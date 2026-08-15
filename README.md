@@ -1,0 +1,33 @@
+# QQ Bot Bridge
+
+A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) host plugin that connects a QQ Open Platform robot (AppID + AppSecret) and bridges its messages into a per-day session of a chosen workspace.
+
+## Features
+
+- **Binding** — `qqbot_bind(appId, appSecret, workspaceId)` starts the WebSocket gateway.
+- **Bidirectional bridge** — forwards inbound text / voice transcription / images into a `qqbot-YYYY-MM-DD` session and sends the agent's reply back to QQ.
+- **Persistence** — AppID / Secret / workspace / sender allowlist in `$DSH_HOME/qqbot-clawbot/state.json` (mode 600); reconnects on restart.
+- **Sender allowlist (TOFU)** — the first sender after binding is trusted; others are dropped.
+- **Media hardening** — image download restricted to Tencent CDN hosts, capped at 20 MB.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `qqbot_list_workspaces` | list candidate workspaces |
+| `qqbot_bind(appId, appSecret, workspaceId)` | bind and connect |
+| `qqbot_status()` | query binding/connection status |
+| `qqbot_unbind()` | unbind and disconnect |
+
+## Install
+
+1. Create a robot at [q.qq.com](https://q.qq.com/) and copy its AppID + AppSecret.
+2. Register the plugin in `~/.dsh/profiles/web/cordis.patch.yml`:
+
+   ```yaml
+   - insert:
+       - id: qqbot-clawbot
+         name: '/Users/<you>/github/qqbot-clawbot/qqbot-clawbot.mjs'
+   ```
+
+3. Restart `dsh web`, then say "绑定 QQ" and provide the AppID + AppSecret.

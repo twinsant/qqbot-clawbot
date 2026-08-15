@@ -1,0 +1,12 @@
+{
+  "name": "qqbot-clawbot",
+  "version": "1.0.0",
+  "description": "QQ bot bridge plugin for DeepSeek Harness",
+  "main": "qqbot-clawbot.mjs",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "@tencent-connect/qqbot-nodejs": "^1.0.4"
+  }
+}
