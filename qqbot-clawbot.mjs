@@ -23,10 +23,10 @@ const SOURCE_PLUGIN = 'qqbot-clawbot'
 const MARKDOWN_SUPPORT = false
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const API_TIMEOUT_MS = 15_000
-// Group messages are dropped by default: TOFU trusts the first sender, which in
-// a group is the first member to mention the bot — not necessarily the owner.
-// Set QQBOT_ALLOW_GROUP=true to accept group messages (still TOFU-gated).
-const ALLOW_GROUP = String(process.env.QQBOT_ALLOW_GROUP || '').toLowerCase() === 'true'
+// Non-C2C messages (group / guild / dm) are dropped by default: TOFU trusts the
+// first sender, which in a group is the first member to mention the bot — not
+// necessarily the owner. Set QQBOT_ALLOW_GROUP=true to accept them (still TOFU-gated).
+const ALLOW_NON_C2C = String(process.env.QQBOT_ALLOW_GROUP || '').toLowerCase() === 'true'
 
 export function apply(ctx) {
   // ---- runtime state (restored from disk on startup) ----
@@ -358,9 +358,8 @@ export function apply(ctx) {
       return
     }
     if (!bot) return
-    const isGroup = msg.kind === 'group'
-    if (isGroup && !ALLOW_GROUP) {
-      console.error('[qqbot] dropping group message (set QQBOT_ALLOW_GROUP=true to allow)')
+    if (msg.kind !== 'c2c' && !ALLOW_NON_C2C) {
+      console.error('[qqbot] dropping non-c2c message (set QQBOT_ALLOW_GROUP=true to allow)')
       return
     }
     const sender = String(msg.senderId || 'unknown')
@@ -369,7 +368,7 @@ export function apply(ctx) {
       console.error('[qqbot] dropping message from untrusted sender', senderLabel)
       return
     }
-    const kind = isGroup ? 'QQ群' : 'QQ'
+    const kind = msg.kind === 'group' ? 'QQ群' : msg.kind === 'c2c' ? 'QQ' : 'QQ频道'
     const text = buildText(msg)
     const atts = Array.isArray(msg.attachments) ? msg.attachments : []
 
