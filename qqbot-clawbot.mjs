@@ -299,6 +299,14 @@ export function apply(ctx) {
         console.error('[qqbot] attach session failed:', error)
       }
     }
+    const titleService = ctx.get('sessionTitle')
+    if (titleService) {
+      try {
+        titleService.rename(handle.agent.session, `QQ · ${dateKey()}`)
+      } catch (error) {
+        console.error('[qqbot] session rename failed:', error)
+      }
+    }
     return handle.agent
   }
 
