@@ -8,6 +8,7 @@ A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 - **Bidirectional bridge** — forwards inbound text / voice transcription / images into a `qqbot-YYYY-MM-DD` session and sends the agent's reply back to QQ.
 - **Persistence** — AppID / Secret / workspace / sender allowlist in `$DSH_HOME/qqbot-clawbot/state.json` (mode 600); reconnects on restart.
 - **Sender allowlist (TOFU)** — the first sender after binding is trusted; others are dropped.
+- **Group messages off by default** — TOFU assumes the first sender is the owner, which is unsafe in groups. Set `QQBOT_ALLOW_GROUP=true` to accept group messages (still TOFU-gated).
 - **Media hardening** — image download restricted to Tencent CDN hosts, capped at 20 MB.
 
 ## Tools
