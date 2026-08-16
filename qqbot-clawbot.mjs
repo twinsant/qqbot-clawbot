@@ -36,6 +36,8 @@ export function apply(ctx) {
   let bot = null
   let botAbort = null
   let msgQueue = Promise.resolve()
+  let currentQqTarget = null // the QQ peer that triggered the in-flight turn
+  const pendingApprovals = new Map() // approvalId -> finish(outcome)
 
   // ---- durable state location ----
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -118,6 +120,18 @@ export function apply(ctx) {
       msgQueue = msgQueue
         .then(() => forwardMessage(msg))
         .catch(error => console.error('[qqbot] forward failed:', error))
+    })
+    instance.on('interaction', (_ctx, event) => {
+      const resolved = event && event.data && event.data.resolved
+      const data = resolved && resolved.button_data
+      if (typeof data !== 'string') return
+      const m = /^approve:([^:]+):([^:]+)$/.exec(data)
+      if (!m) return
+      const finish = pendingApprovals.get(m[1])
+      if (!finish) return
+      const decision = m[2]
+      finish(decision === 'allow-once' ? 'allowed-once' : decision === 'deny' ? 'rejected' : 'cancelled')
+      instance.acknowledgeInteraction(event.id).catch(err => console.error('[qqbot] ack interaction failed:', err))
     })
     bot = instance
     botAbort = new AbortController()
@@ -262,11 +276,14 @@ export function apply(ctx) {
       try {
         const resolved = await presets.resolve(undefined)
         presetId = resolved && resolved.id
-        if (presetId) setup = async agentCtx => { await presets.mount(agentCtx, presetId) }
       } catch (error) {
         console.error('[qqbot] preset resolve failed; creating without preset:', error)
         presetId = undefined
       }
+    }
+    setup = async agentCtx => {
+      if (presets !== undefined && presetId) await presets.mount(agentCtx, presetId)
+      registerApprovalListener(agentCtx)
     }
 
     let handle
@@ -352,6 +369,74 @@ export function apply(ctx) {
     }
   })()
 
+  // ---- HITL approval: route approval/request to QQ buttons ----
+  function makeButton(id, label, visitedLabel, data, style) {
+    return {
+      id,
+      render_data: { label, visited_label: visitedLabel, style },
+      action: { type: 1, data, permission: { type: 2 }, click_limit: 1 },
+      group_id: 'approval',
+    }
+  }
+
+  function buildApprovalKeyboard(approvalId) {
+    return {
+      content: {
+        rows: [{
+          buttons: [
+            makeButton('allow', '✅ 允许一次', '已允许', `approve:${approvalId}:allow-once`, 1),
+            makeButton('deny', '❌ 拒绝', '已拒绝', `approve:${approvalId}:deny`, 0),
+          ],
+        }],
+      },
+    }
+  }
+
+  function answerQqApproval(req) {
+    return new Promise((resolve) => {
+      const approvalId = makeId('appr')
+      let settled = false
+      let timer = null
+      const onAbort = () => finish('cancelled')
+      const cleanup = () => {
+        pendingApprovals.delete(approvalId)
+        if (req.signal) req.signal.removeEventListener('abort', onAbort)
+        if (timer) clearTimeout(timer)
+      }
+      const finish = (outcome) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(outcome)
+      }
+      if (req.signal) {
+        if (req.signal.aborted) return finish('cancelled')
+        req.signal.addEventListener('abort', onAbort, { once: true })
+      }
+      timer = setTimeout(() => finish('cancelled'), 5 * 60 * 1000)
+      pendingApprovals.set(approvalId, finish)
+      const text = `⚠️ 需要审批\n工具: ${req.toolName}${req.reason ? `\n原因: ${req.reason}` : ''}`
+      bot.sendTextWithKeyboard(currentQqTarget, text, buildApprovalKeyboard(approvalId)).catch((error) => {
+        console.error('[qqbot] approval send failed:', error)
+        finish(null) // defer to other answerers
+      })
+    })
+  }
+
+  function registerApprovalListener(agentCtx) {
+    agentCtx.on('approval/request', async (req, next) => {
+      if (!currentQqTarget || !bot) return next()
+      try {
+        const outcome = await answerQqApproval(req)
+        if (outcome === null) return next()
+        return outcome
+      } catch (error) {
+        console.error('[qqbot] approval answer failed:', error)
+        return next()
+      }
+    })
+  }
+
   async function forwardMessage(msg) {
     if (!targetWorkspaceId) {
       console.error('[qqbot] no target workspace; dropping message')
@@ -409,22 +494,27 @@ export function apply(ctx) {
     const content = [{ type: 'text', text: head.join('\n') }]
     if (attachment) content.push({ type: 'image', attachment })
 
-    const agent = await ensureDailyAgent(targetWorkspaceId)
-    const startSeq = agent.session.events.length
-    agent.followup({
-      id: makeId('qqmsg'),
-      role: 'user',
-      content,
-      source: { kind: 'plugin', plugin: SOURCE_PLUGIN },
-    })
-    await agent.whenIdle()
-    const replyText = collectAssistantText(agent.session.events, startSeq)
-    if (replyText && bot) {
-      try {
-        await bot.sendText(msg.replyTarget, replyText)
-      } catch (error) {
-        console.error('[qqbot] send reply failed:', error)
+    currentQqTarget = msg.replyTarget
+    try {
+      const agent = await ensureDailyAgent(targetWorkspaceId)
+      const startSeq = agent.session.events.length
+      agent.followup({
+        id: makeId('qqmsg'),
+        role: 'user',
+        content,
+        source: { kind: 'plugin', plugin: SOURCE_PLUGIN },
+      })
+      await agent.whenIdle()
+      const replyText = collectAssistantText(agent.session.events, startSeq)
+      if (replyText && bot) {
+        try {
+          await bot.sendText(msg.replyTarget, replyText)
+        } catch (error) {
+          console.error('[qqbot] send reply failed:', error)
+        }
       }
+    } finally {
+      currentQqTarget = null
     }
   }
 
