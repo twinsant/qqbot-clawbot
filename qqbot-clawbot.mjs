@@ -37,7 +37,7 @@ export function apply(ctx) {
   let botAbort = null
   let msgQueue = Promise.resolve()
   let currentQqTarget = null // the QQ peer that triggered the in-flight turn
-  const pendingApprovals = new Map() // approvalId -> finish(outcome)
+  let pendingApproval = null // { senderId, resolve } awaiting a text response
 
   // ---- durable state location ----
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -117,21 +117,21 @@ export function apply(ctx) {
     instance.on('resumed', () => console.log('[qqbot] gateway resumed'))
     instance.on('error', err => console.error('[qqbot] gateway error:', err && err.message ? err.message : err))
     instance.on('message', (_ctx, msg) => {
+      const sender = String(msg.senderId || 'unknown')
+      if (pendingApproval && pendingApproval.senderId === sender) {
+        const decision = parseApprovalDecision(msg.content)
+        if (decision) {
+          const resolve = pendingApproval.resolve
+          pendingApproval = null
+          resolve(decision)
+        } else {
+          instance.sendText(msg.replyTarget, '请回复「允许」或「拒绝」').catch(() => {})
+        }
+        return
+      }
       msgQueue = msgQueue
         .then(() => forwardMessage(msg))
         .catch(error => console.error('[qqbot] forward failed:', error))
-    })
-    instance.on('interaction', (_ctx, event) => {
-      const resolved = event && event.data && event.data.resolved
-      const data = resolved && resolved.button_data
-      if (typeof data !== 'string') return
-      const m = /^approve:([^:]+):([^:]+)$/.exec(data)
-      if (!m) return
-      const finish = pendingApprovals.get(m[1])
-      if (!finish) return
-      const decision = m[2]
-      finish(decision === 'allow-once' ? 'allowed-once' : decision === 'deny' ? 'rejected' : 'cancelled')
-      instance.acknowledgeInteraction(event.id).catch(err => console.error('[qqbot] ack interaction failed:', err))
     })
     bot = instance
     botAbort = new AbortController()
@@ -369,37 +369,21 @@ export function apply(ctx) {
     }
   })()
 
-  // ---- HITL approval: route approval/request to QQ buttons ----
-  function makeButton(id, label, visitedLabel, data, style) {
-    return {
-      id,
-      render_data: { label, visited_label: visitedLabel, style },
-      action: { type: 1, data, permission: { type: 2 }, click_limit: 1 },
-      group_id: 'approval',
-    }
-  }
-
-  function buildApprovalKeyboard(approvalId) {
-    return {
-      content: {
-        rows: [{
-          buttons: [
-            makeButton('allow', '✅ 允许一次', '已允许', `approve:${approvalId}:allow-once`, 1),
-            makeButton('deny', '❌ 拒绝', '已拒绝', `approve:${approvalId}:deny`, 0),
-          ],
-        }],
-      },
-    }
+  // ---- HITL approval: route approval/request to a QQ text prompt ----
+  function parseApprovalDecision(text) {
+    const t = String(text || '').trim().toLowerCase()
+    if (['允许', '同意', '是', 'yes', 'y', 'ok', 'allow', 'approve'].includes(t)) return 'allowed-once'
+    if (['拒绝', '否', '不', 'no', 'n', 'deny', 'reject'].includes(t)) return 'rejected'
+    return null
   }
 
   function answerQqApproval(req) {
     return new Promise((resolve) => {
-      const approvalId = makeId('appr')
       let settled = false
       let timer = null
       const onAbort = () => finish('cancelled')
       const cleanup = () => {
-        pendingApprovals.delete(approvalId)
+        if (pendingApproval && pendingApproval.resolve === finish) pendingApproval = null
         if (req.signal) req.signal.removeEventListener('abort', onAbort)
         if (timer) clearTimeout(timer)
       }
@@ -414,9 +398,9 @@ export function apply(ctx) {
         req.signal.addEventListener('abort', onAbort, { once: true })
       }
       timer = setTimeout(() => finish('cancelled'), 5 * 60 * 1000)
-      pendingApprovals.set(approvalId, finish)
-      const text = `⚠️ 需要审批\n工具: ${req.toolName}${req.reason ? `\n原因: ${req.reason}` : ''}`
-      bot.sendTextWithKeyboard(currentQqTarget, text, buildApprovalKeyboard(approvalId)).catch((error) => {
+      pendingApproval = { senderId: currentQqTarget.targetId, resolve: finish }
+      const text = `⚠️ 需要审批\n工具: ${req.toolName}${req.reason ? `\n原因: ${req.reason}` : ''}\n请回复「允许」或「拒绝」`
+      bot.sendText(currentQqTarget, text).catch((error) => {
         console.error('[qqbot] approval send failed:', error)
         finish(null) // defer to other answerers
       })
