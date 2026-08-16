@@ -38,6 +38,7 @@ export function apply(ctx) {
   let msgQueue = Promise.resolve()
   let currentQqTarget = null // the QQ peer that triggered the in-flight turn
   let pendingApproval = null // { senderId, resolve } awaiting a text response
+  const dailyAgentIds = new Set() // session ids of agents this plugin created (for approval routing)
 
   // ---- durable state location ----
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -249,6 +250,7 @@ export function apply(ctx) {
       sessionId = `${baseId}-r${Date.now().toString(36)}`
       existing = undefined
     }
+    dailyAgentIds.add(sessionId)
     if (existing !== undefined) return existing
 
     const workspace = workspaceRegistry !== undefined ? workspaceRegistry.get(workspaceId) : undefined
@@ -283,7 +285,6 @@ export function apply(ctx) {
     }
     setup = async agentCtx => {
       if (presets !== undefined && presetId) await presets.mount(agentCtx, presetId)
-      registerApprovalListener(agentCtx)
     }
 
     let handle
@@ -407,8 +408,9 @@ export function apply(ctx) {
     })
   }
 
-  function registerApprovalListener(agentCtx) {
-    agentCtx.on('approval/request', async (req, next) => {
+  function registerApprovalAnswerer() {
+    ctx.on('approval/request', async (req, next) => {
+      if (!dailyAgentIds.has(String(req.agent && req.agent.id))) return next()
       if (!currentQqTarget || !bot) return next()
       try {
         const outcome = await answerQqApproval(req)
@@ -418,7 +420,7 @@ export function apply(ctx) {
         console.error('[qqbot] approval answer failed:', error)
         return next()
       }
-    })
+    }, { prepend: true })
   }
 
   async function forwardMessage(msg) {
@@ -640,5 +642,6 @@ export function apply(ctx) {
   }
 
   restoreState()
+  registerApprovalAnswerer()
   ctx.effect(() => stopBot, 'qqbot-clawbot.lifecycle')
 }
