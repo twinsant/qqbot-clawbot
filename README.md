@@ -10,7 +10,7 @@ A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 - **Sender allowlist (TOFU)** — the first sender after binding is trusted; others are dropped.
 - **C2C only by default** — TOFU assumes the first sender is the owner, which is unsafe in groups. Group / guild / dm messages are dropped unless `QQBOT_ALLOW_GROUP=true` (still TOFU-gated).
 - **Media hardening** — image download restricted to Tencent CDN hosts, capped at 20 MB. Images attach inline only when the target model supports vision.
-- **Human-in-the-loop (HITL) approval** — escalating a sandboxed action prompts `⚠️ 需要审批 … 回复「允许」或「拒绝」` in QQ; the tool blocks until you reply.
+- **Human-in-the-loop (HITL) approval** — escalating a sandboxed action prompts `⚠️ 需要审批 … 回复「允许」或「拒绝」` in QQ with the tool's arguments; the tool blocks until you reply. C2C chats only — group-triggered approvals fall through to the web UI.
 
 ## Tools
 

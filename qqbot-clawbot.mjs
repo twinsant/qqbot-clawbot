@@ -378,6 +378,29 @@ export function apply(ctx) {
     return null
   }
 
+  // The prompt must show what is being approved, not just the tool name; the
+  // arguments live on the `tool/call` session event linked by `req.callId`.
+  function describeToolCall(req) {
+    const lines = [`工具: ${req.toolName}`]
+    try {
+      const events = req.agent && req.agent.session && req.agent.session.events
+      if (req.callId && Array.isArray(events)) {
+        for (let i = events.length - 1; i >= 0; i--) {
+          const ev = events[i]
+          if (ev && ev.type === 'tool/call' && ev.data && ev.data.callId === req.callId) {
+            const args = String(ev.data.arguments || '')
+            if (args && args !== '{}') lines.push(`参数: ${args.length > 600 ? `${args.slice(0, 600)}…` : args}`)
+            break
+          }
+        }
+      }
+    } catch {
+      // best-effort argument lookup over plugin-visible session events; the prompt still names the tool
+    }
+    if (req.reason) lines.push(`原因: ${req.reason}`)
+    return lines.join('\n')
+  }
+
   function answerQqApproval(req) {
     return new Promise((resolve) => {
       let settled = false
@@ -400,7 +423,7 @@ export function apply(ctx) {
       }
       timer = setTimeout(() => finish('cancelled'), 5 * 60 * 1000)
       pendingApproval = { senderId: currentQqTarget.targetId, resolve: finish }
-      const text = `⚠️ 需要审批\n工具: ${req.toolName}${req.reason ? `\n原因: ${req.reason}` : ''}\n请回复「允许」或「拒绝」`
+      const text = `⚠️ 需要审批\n${describeToolCall(req)}\n请回复「允许」或「拒绝」`
       bot.sendText(currentQqTarget, text).catch((error) => {
         console.error('[qqbot] approval send failed:', error)
         finish(null) // defer to other answerers
@@ -411,7 +434,10 @@ export function apply(ctx) {
   function registerApprovalAnswerer() {
     ctx.on('approval/request', async (req, next) => {
       if (!dailyAgentIds.has(String(req.agent && req.agent.id))) return next()
-      if (!currentQqTarget || !bot) return next()
+      // c2c only: in a group the prompt would broadcast to every member, and
+      // the decision match compares sender ids against the group openid, so
+      // nobody could ever answer. Defer to the web UI answerer instead.
+      if (!currentQqTarget || currentQqTarget.scope !== 'c2c' || !bot) return next()
       try {
         const outcome = await answerQqApproval(req)
         if (outcome === null) return next()
