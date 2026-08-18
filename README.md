@@ -4,7 +4,7 @@ A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 
 ## Features
 
-- **Binding** — `qqbot_bind(appId, appSecret, workspaceId)` starts the WebSocket gateway.
+- **Binding** — Settings → QQ Bot in the web UI (AppID + AppSecret with an eye toggle); the host half starts the WebSocket gateway on change.
 - **Bidirectional bridge** — forwards inbound text / voice transcription / images into a `qqbot-YYYY-MM-DD` session and sends the agent's reply back to QQ.
 - **Persistence** — AppID / Secret / workspace / sender allowlist in `$DSH_HOME/qqbot-clawbot/state.json` (mode 600); reconnects on restart.
 - **Sender allowlist (TOFU)** — the first sender after binding is trusted; others are dropped.
