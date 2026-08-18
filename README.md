@@ -17,20 +17,30 @@ A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 | Tool | Purpose |
 | --- | --- |
 | `qqbot_list_workspaces` | list candidate workspaces |
-| `qqbot_bind(appId, appSecret, workspaceId)` | bind and connect |
 | `qqbot_status()` | query binding/connection status |
 | `qqbot_unbind()` | unbind and disconnect |
 
+Binding is done from the web UI: Settings → QQ Bot (AppID / AppSecret / workspace), stored in the `qqbot` settings namespace; the host half auto-connects on change.
+
 ## Install
 
-1. `npm install` — installs the `@tencent-connect/qqbot-nodejs` SDK dependency.
-2. Create a robot at [q.qq.com](https://q.qq.com/) and copy its AppID + AppSecret.
-3. Register the plugin in `~/.dsh/profiles/web/cordis.patch.yml`:
+This package builds inside a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) workspace checkout.
+
+1. Place (or symlink) this directory at `packages/qqbot/qqbot-clawbot` in the harness repo, then run `pnpm install` at the repo root.
+2. Build the two halves:
+
+   ```sh
+   node_modules/.bin/tsc -b packages/qqbot/qqbot-clawbot/tsconfig.client.json
+   cd packages/qqbot/qqbot-clawbot && ../../../node_modules/.bin/tsdown --env.DSH_BUILD_FACE client
+   ```
+
+3. Create a robot at [q.qq.com](https://q.qq.com/) and copy its AppID + AppSecret.
+4. Register the plugin by package name in `~/.dsh/profiles/web/cordis.patch.yml`:
 
    ```yaml
    - insert:
        - id: qqbot-clawbot
-         name: '/Users/<you>/github/qqbot-clawbot/qqbot-clawbot.mjs'
+         name: '@deepseek-ai/dsh-qqbot-clawbot'
    ```
 
-4. Restart `dsh web`, then say "绑定 QQ" and provide the AppID + AppSecret.
+5. Restart `dsh web`, open Settings → QQ Bot, and enter the AppID + AppSecret (eye toggle reveals the secret).
