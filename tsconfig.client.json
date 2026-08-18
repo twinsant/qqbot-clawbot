@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "tsBuildInfoFile": "lib/tsconfig.client.tsbuildinfo"
+  },
+  "files": ["src/client/index.tsx"],
+  "references": [
+    { "path": "../../../vendor/cordis" },
+    { "path": "../../client/runtime" }
+  ]
+}
