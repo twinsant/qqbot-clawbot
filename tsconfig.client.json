@@ -5,9 +5,20 @@
     "outDir": "lib/types",
     "tsBuildInfoFile": "lib/tsconfig.client.tsbuildinfo"
   },
-  "files": ["src/client/index.tsx"],
+  "include": [
+    "src/client",
+    "src/types.ts",
+    "src/css-modules.d.ts"
+  ],
   "references": [
     { "path": "../../../vendor/cordis" },
-    { "path": "../../client/runtime" }
+    { "path": "../../client/runtime" },
+    { "path": "../../client/locale" },
+    { "path": "../../client/ui-slots" },
+    { "path": "../../client/ui-primitives" },
+    { "path": "../../client/ui-settings" },
+    { "path": "../../client/web-react" },
+    { "path": "../../runtime-diagnostics/invariants" },
+    { "path": "../../api/remotes/tsconfig.client.json" }
   ]
 }

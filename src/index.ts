@@ -1,625 +1,444 @@
-// @ts-nocheck
 /**
- * QQ bot bridge — host half.
- *
- * Binds a QQ Open Platform robot (AppID + AppSecret) via the
- * @tencent-connect/qqbot-nodejs SDK. Credentials / target workspace / sender
- * allowlist live in the `qqbot` settings namespace (edited from the web UI);
- * the plugin auto-connects when the settings carry an AppID + AppSecret.
+ * QQ Open Platform protocol driver. Binds one robot from the `qqbot` settings
+ * namespace and forwards inbound C2C messages into a per-day harness session.
+ * Binding, workspace choice, and allowlist edits belong to the settings
+ * document; this package does not register model-facing tools.
+ * @module @deepseek-ai/dsh-qqbot-clawbot
  */
+
 import type { Context } from '@deepseek-ai/cordis'
 import { QQBot } from '@tencent-connect/qqbot-nodejs'
-import Schema from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-session-title'
+import type {} from '@deepseek-ai/dsh-workspace'
+import type { Config } from './schema.ts'
+import type { QqBotSettings, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
+import {
+  dailySessionId,
+  firstImageAttachment,
+  formatInboundBody,
+  isAllowedMediaUrl,
+  parseApprovalDecision,
+  sniffImageType,
+  trustSender,
+} from './policy.ts'
+import { collectAssistantReply } from './reply.ts'
+import { QQ_NS, QQ_SCHEMA } from './schema.ts'
 
 export const name = 'qqbot-clawbot'
-export const inject = ['tools']
+export const inject = ['agents', 'settings']
+export { Config } from './schema.ts'
+export type { QqBotSettings } from './types.ts'
+export {
+  dailySessionId,
+  dateKey,
+  isAllowedMediaUrl,
+  parseApprovalDecision,
+  sanitizeInbound,
+  sniffImageType,
+  trustSender,
+} from './policy.ts'
+export { QQ_NS, QQ_SCHEMA } from './schema.ts'
 
-const API_BASE_URL = 'https://api.sgroup.qq.com'
-const TOKEN_BASE_URL = 'https://bots.qq.com'
 const SOURCE_PLUGIN = 'qqbot-clawbot'
 const MARKDOWN_SUPPORT = false
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024
-const API_TIMEOUT_MS = 15_000
-// Non-C2C messages (group / guild / dm) are dropped by default: TOFU trusts the
-// first sender, which in a group is the first member to mention the bot — not
-// necessarily the owner. Set QQBOT_ALLOW_GROUP=true to accept them (still TOFU-gated).
-const ALLOW_NON_C2C = String(process.env.QQBOT_ALLOW_GROUP || '').toLowerCase() === 'true'
+const API_BASE_URL = 'https://api.sgroup.qq.com'
+const TOKEN_BASE_URL = 'https://bots.qq.com'
 
-const QQ_NS = settingsNamespace('qqbot')
-const QQ_SCHEMA = Schema.object({
-  appId: Schema.string().default(''),
-  appSecret: Schema.string().default(''),
-  workspaceId: Schema.string().default(''),
-  allowedSenders: Schema.array(Schema.string()).default([]),
-})
+/**
+ * Adapt the official SDK instance to the narrow gateway this plugin drives.
+ * @param appId - QQ Open Platform AppID.
+ * @param appSecret - QQ Open Platform AppSecret.
+ * @returns a gateway wrapping one SDK client.
+ */
+export function createOfficialGateway(appId: string, appSecret: string): QqGateway {
+  return new QQBot({
+    appId,
+    appSecret,
+    accountId: 'default',
+    markdownSupport: MARKDOWN_SUPPORT,
+    baseUrl: API_BASE_URL,
+    tokenBaseUrl: TOKEN_BASE_URL,
+  }) as unknown as QqGateway
+}
 
-export function apply(ctx: Context) {
-  let bound = null // { appId, appSecret }
-  let targetWorkspaceId = null
-  let allowedSenders = []
-  let bot = null
-  let botAbort = null
-  let msgQueue = Promise.resolve()
-  let currentQqTarget = null
-  let pendingApproval = null
-  const dailyAgentIds = new Set()
-  function getSettings() {
-    return ctx.get('settings')
-  }
+/**
+ * Mount the QQ protocol driver.
+ * @param ctx - context carrying `agents` and `settings`.
+ * @param config - deployment knobs for group admission, image caps, and approval timeout.
+ * @param createGateway - gateway factory; production uses the official SDK, tests pass a fake.
+ */
+export function apply(ctx: Context, config: Config, createGateway = createOfficialGateway): void {
+  ctx.settings.register(QQ_NS, QQ_SCHEMA)
 
-  function dateKey() {
-    const d = new Date()
-    const m = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    return `${d.getFullYear()}-${m}-${day}`
-  }
+  let bound: { appId: string; appSecret: string } | undefined
+  let targetWorkspaceId = ''
+  let allowedSenders: string[] = []
+  let bot: QqGateway | undefined
+  let botAbort: AbortController | undefined
+  let messageQueue: Promise<void> = Promise.resolve()
+  let currentTarget: QqReplyTarget | undefined
+  let pendingApproval: { senderId: string; resolve: (outcome: ApprovalOutcome) => void } | undefined
+  const dailyAgentIds = new Set<string>()
+  const imageSupport = createImageSupportProbe(ctx)
 
-  function makeId(prefix) {
-    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  }
-
-  function getState() {
-    return {
-      bound: Boolean(bound),
-      appId: bound ? bound.appId : null,
-      targetWorkspaceId,
-      allowedSenders: [...allowedSenders],
-      connected: Boolean(bot),
+  const stopBot = (): void => {
+    botAbort?.abort()
+    botAbort = undefined
+    if (bot === undefined) return
+    try {
+      bot.stop()
+    } catch (error) {
+      console.error('[qqbot] stop failed:', error)
     }
+    bot = undefined
   }
 
-  // ---- bot lifecycle ----
-  function stopBot() {
-    if (botAbort) {
-      botAbort.abort()
-      botAbort = null
-    }
-    if (bot) {
-      try { bot.stop() } catch (error) { console.error('[qqbot] stop failed:', error) }
-      bot = null
-    }
-  }
-
-  function startBot(appId, appSecret) {
+  const startBot = (appId: string, appSecret: string): void => {
     stopBot()
-    const instance = new QQBot({
-      appId,
-      appSecret,
-      accountId: 'default',
-      markdownSupport: MARKDOWN_SUPPORT,
-      baseUrl: API_BASE_URL,
-      tokenBaseUrl: TOKEN_BASE_URL,
+    const instance = createGateway(appId, appSecret)
+    instance.on('ready', () => { console.log('[qqbot] gateway ready') })
+    instance.on('resumed', () => { console.log('[qqbot] gateway resumed') })
+    instance.on('error', (err) => {
+      console.error('[qqbot] gateway error:', err instanceof Error ? err.message : err)
     })
-    instance.on('ready', () => console.log('[qqbot] gateway ready'))
-    instance.on('resumed', () => console.log('[qqbot] gateway resumed'))
-    instance.on('error', err => console.error('[qqbot] gateway error:', err && err.message ? err.message : err))
-    instance.on('message', (_ctx, msg) => {
-      const sender = String(msg.senderId || 'unknown')
-      if (pendingApproval && pendingApproval.senderId === sender) {
-        const decision = parseApprovalDecision(msg.content)
-        if (decision) {
-          const resolve = pendingApproval.resolve
-          pendingApproval = null
-          resolve(decision)
-        } else {
-          instance.sendText(msg.replyTarget, '请回复「允许」或「拒绝」').catch(() => {})
+    instance.on('message', (_sdkCtx, raw) => {
+      const message = raw as QqInboundMessage
+      const sender = message.senderId ?? 'unknown'
+      if (pendingApproval !== undefined && pendingApproval.senderId === sender) {
+        const decision = parseApprovalDecision(message.content ?? '')
+        if (decision === null) {
+          void instance.sendText(message.replyTarget, '请回复「允许」或「拒绝」').catch(() => {})
+          return
         }
+        const resolve = pendingApproval.resolve
+        pendingApproval = undefined
+        resolve(decision)
         return
       }
-      msgQueue = msgQueue
-        .then(() => forwardMessage(msg))
-        .catch(error => console.error('[qqbot] forward failed:', error))
+      messageQueue = messageQueue
+        .then(() => forwardMessage(message))
+        .catch((error: unknown) => { console.error('[qqbot] forward failed:', error) })
     })
     bot = instance
     botAbort = new AbortController()
-    void instance.start(botAbort.signal).catch((error) => {
-      console.error('[qqbot] gateway start failed:', error && error.message ? error.message : error)
+    void instance.start(botAbort.signal).catch((error: unknown) => {
+      console.error('[qqbot] gateway start failed:', error instanceof Error ? error.message : error)
     })
   }
 
-  // ---- message shape helpers ----
-  function isAllowedMediaUrl(url) {
-    try {
-      const u = new URL(url)
-      if (u.protocol !== 'https:') return false
-      return ['qq.com', 'gtimg.com', 'myqcloud.com', 'qpic.cn'].some(
-        d => u.hostname === d || u.hostname.endsWith(`.${d}`),
-      )
-    } catch {
-      return false
+  const persistAllowedSenders = (): void => {
+    void ctx.settings.update(QQ_NS, { allowedSenders: [...allowedSenders] }).catch(() => {})
+  }
+
+  const applySettings = (): void => {
+    const value = (ctx.settings.get(QQ_NS) as QqBotSettings | undefined) ?? emptySettings()
+    const appId = value.appId.trim()
+    const appSecret = value.appSecret.trim()
+    targetWorkspaceId = value.workspaceId
+    if (Array.isArray(value.allowedSenders)) {
+      allowedSenders = value.allowedSenders.filter((item: string) => item.length > 0 && item !== 'unknown')
     }
-  }
-
-  function sniffImageType(bytes) {
-    if (!bytes || bytes.length < 12) return null
-    if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg'
-    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png'
-    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif'
-    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
-      && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp'
-    return null
-  }
-
-  function buildText(msg) {
-    const parts = []
-    if (typeof msg.content === 'string' && msg.content.trim()) parts.push(msg.content)
-    const atts = Array.isArray(msg.attachments) ? msg.attachments : []
-    for (const a of atts) {
-      if (a && typeof a.asr_refer_text === 'string' && a.asr_refer_text.trim()) {
-        parts.push(`[语音转文字] ${a.asr_refer_text}`)
+    const current = bound
+    if (appId && appSecret) {
+      if (current?.appId !== appId || current.appSecret !== appSecret) {
+        bound = { appId, appSecret }
+        startBot(appId, appSecret)
+        console.log('[qqbot] bound', appId)
       }
+      return
     }
-    return parts.join('\n')
-  }
-
-  function mediaSummary(a) {
-    const ct = (a && a.content_type) || ''
-    if (ct.startsWith('image/')) return '[图片]'
-    if (ct.startsWith('audio/') || ct.includes('voice')) return '[语音]'
-    if (ct.startsWith('video/')) return '[视频]'
-    if (a && a.filename) return `[文件: ${a.filename}]`
-    return '[附件]'
-  }
-
-  async function readBodyCapped(res, maxBytes) {
-    const declared = Number(res.headers.get('content-length'))
-    if (Number.isFinite(declared) && declared > maxBytes) return null
-    const chunks = []
-    let total = 0
-    for await (const chunk of res.body) {
-      total += chunk.length
-      if (total > maxBytes) return null
-      chunks.push(chunk)
-    }
-    return Buffer.concat(chunks)
-  }
-
-  async function downloadImage(attachment) {
-    const url = attachment && attachment.url
-    if (!url || !isAllowedMediaUrl(url)) return null
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(API_TIMEOUT_MS) })
-      if (!res.ok) return null
-      const buf = await readBodyCapped(res, MAX_IMAGE_BYTES)
-      if (!buf) return null
-      const mediaType = sniffImageType(buf)
-      if (!mediaType) return null
-      return { data: new Uint8Array(buf), mediaType }
-    } catch (error) {
-      console.error('[qqbot] image download failed:', error)
-      return null
+    if (bound !== undefined) {
+      stopBot()
+      bound = undefined
     }
   }
 
-  function collectAssistantText(events, startSeq) {
-    let text = ''
-    for (let i = startSeq; i < events.length; i++) {
-      const ev = events[i]
-      if (!ev || ev.type !== 'assistant/message') continue
-      const msg = ev.data && ev.data.message
-      if (!msg || !Array.isArray(msg.content)) continue
-      const parts = []
-      for (const block of msg.content) {
-        if (block && block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-          parts.push(block.text)
-        }
-      }
-      const joined = parts.join('')
-      if (joined.trim()) text = joined
-    }
-    return text.trim()
-  }
-
-  // ---- daily session ----
-  async function ensureDailyAgent(workspaceId) {
-    const agents = ctx.get('agents')
-    if (agents === undefined) throw new Error('agents service unavailable')
-    const workspaceRegistry = ctx.get('workspaceRegistry')
-    const presets = ctx.get('agentPresets')
-    const sessionPersistence = ctx.get('sessionPersistence')
-
-    const baseId = `qqbot-${dateKey()}`
-    let sessionId = baseId
-    let existing = agents.get(sessionId)
-    if (existing !== undefined && !(existing.options && existing.options.model)) {
-      sessionId = `${baseId}-r${Date.now().toString(36)}`
-      existing = undefined
-    }
-    dailyAgentIds.add(sessionId)
-    if (existing !== undefined) return existing
-
-    const workspace = workspaceRegistry !== undefined ? workspaceRegistry.get(workspaceId) : undefined
-    let cwd = workspace !== undefined ? workspace.path : undefined
-    if (!cwd) {
-      const sp = ctx.get('sandboxPolicy')
-      cwd = sp && sp.workspaceRoot ? sp.workspaceRoot : undefined
-    }
-    if (!cwd) throw new Error(`cannot resolve workspace cwd for ${workspaceId}`)
-
-    let agentOptions
-    const adm = ctx.get('agentDefaultModel')
-    if (adm !== undefined) {
-      try {
-        const sel = adm.currentSelection()
-        if (sel && sel.provider && sel.model) agentOptions = { provider: sel.provider, model: sel.model }
-      } catch (error) {
-        console.error('[qqbot] default model resolve failed:', error)
-      }
-    }
-
-    let presetId
-    if (presets !== undefined) {
-      try {
-        const resolved = await presets.resolve(undefined)
-        presetId = resolved && resolved.id
-      } catch (error) {
-        console.error('[qqbot] preset resolve failed; creating without preset:', error)
-        presetId = undefined
-      }
-    }
-    const setup = async (agentCtx) => {
-      if (presets !== undefined && presetId) await presets.mount(agentCtx, presetId)
-    }
-
-    let handle
-    if (sessionPersistence !== undefined) {
-      try {
-        const stored = (await sessionPersistence.list()).find(h => h && h.id === sessionId)
-        if (stored !== undefined) {
-          handle = await agents.resume({
-            resumeSessionId: sessionId,
-            ...(agentOptions ? { agentOptions } : {}),
-            ...(setup ? { setup } : {}),
-          })
-          return handle.agent
-        }
-      } catch (error) {
-        console.error('[qqbot] resume check failed; will create fresh:', error)
-      }
-    }
-
-    handle = await agents.create({
-      sessionId,
-      ...(agentOptions ? { agentOptions } : {}),
-      meta: { cwd, ...(presetId ? { agentPreset: presetId } : {}) },
-      ...(setup ? { setup } : {}),
-    })
-    if (workspace !== undefined) {
-      try {
-        await workspace.attachSession(sessionId)
-      } catch (error) {
-        console.error('[qqbot] attach session failed:', error)
-      }
-    }
-    const titleService = ctx.get('sessionTitle')
-    if (titleService) {
-      try {
-        titleService.rename(handle.agent.session, `QQ · ${dateKey()}`)
-      } catch (error) {
-        console.error('[qqbot] session rename failed:', error)
-      }
-    }
-    return handle.agent
-  }
-
-  function sanitizeInbound(text) {
-    return String(text).replace(/\[QQ/g, '［QQ')
-  }
-
-  function isTrustedSender(sender) {
-    if (allowedSenders.includes(sender)) return true
-    if (sender === 'unknown') return false
-    if (allowedSenders.length === 0) {
-      allowedSenders = [sender]
-      persistAllowedSenders()
-      console.log('[qqbot] trusted first sender', sender)
-      return true
-    }
-    return false
-  }
-
-  function persistAllowedSenders() {
-    const settings = getSettings()
-    if (settings === undefined) return
-    settings.update(QQ_NS, { allowedSenders: [...allowedSenders] }).catch(() => {})
-  }
-
-  const modelSupportsImages = (() => {
-    let resolved = false
-    let supports = false
-    return async function check() {
-      if (resolved) return supports
-      resolved = true
-      try {
-        const adm = ctx.get('agentDefaultModel')
-        const llm = ctx.get('llm')
-        const sel = adm ? adm.currentSelection() : null
-        if (sel && sel.provider && sel.model && llm) {
-          const info = await llm.resolveModelInfo(sel.provider, sel.model)
-          if (info && Array.isArray(info.inputModalities)) supports = info.inputModalities.includes('image')
-        }
-      } catch (error) {
-        console.error('[qqbot] model image support check failed:', error)
-      }
-      return supports
-    }
-  })()
-
-  // ---- HITL approval ----
-  function parseApprovalDecision(text) {
-    const t = String(text || '').trim().toLowerCase()
-    if (['允许', '同意', '是', 'yes', 'y', 'ok', 'allow', 'approve'].includes(t)) return 'allowed-once'
-    if (['拒绝', '否', '不', 'no', 'n', 'deny', 'reject'].includes(t)) return 'rejected'
-    return null
-  }
-
-  function describeToolCall(req) {
-    const lines = [`工具: ${req.toolName}`]
-    try {
-      const events = req.agent && req.agent.session && req.agent.session.events
-      if (req.callId && Array.isArray(events)) {
-        for (let i = events.length - 1; i >= 0; i--) {
-          const ev = events[i]
-          if (ev && ev.type === 'tool/call' && ev.data && ev.data.callId === req.callId) {
-            const args = String(ev.data.arguments || '')
-            if (args && args !== '{}') lines.push(`参数: ${args.length > 600 ? `${args.slice(0, 600)}…` : args}`)
-            break
-          }
-        }
-      }
-    } catch {
-      // best-effort argument lookup
-    }
-    if (req.reason) lines.push(`原因: ${req.reason}`)
-    return lines.join('\n')
-  }
-
-  function answerQqApproval(req) {
+  const answerQqApproval = (req: ApprovalRequest): Promise<ApprovalOutcome | null> => {
+    const target = currentTarget
+    const live = bot
+    if (target === undefined || live === undefined) return Promise.resolve(null)
     return new Promise((resolve) => {
       let settled = false
-      let timer = null
-      const onAbort = () => finish('cancelled')
-      const cleanup = () => {
-        if (pendingApproval && pendingApproval.resolve === finish) pendingApproval = null
-        if (req.signal) req.signal.removeEventListener('abort', onAbort)
-        if (timer) clearTimeout(timer)
-      }
-      const finish = (outcome) => {
+      const timer = setTimeout(() => { finish('cancelled') }, config.approvalTimeoutMs)
+      const finish = (outcome: ApprovalOutcome | null): void => {
         if (settled) return
         settled = true
-        cleanup()
+        if (pendingApproval?.resolve === finish) pendingApproval = undefined
+        req.signal?.removeEventListener('abort', onAbort)
+        clearTimeout(timer)
         resolve(outcome)
       }
-      if (req.signal) {
-        if (req.signal.aborted) return finish('cancelled')
-        req.signal.addEventListener('abort', onAbort, { once: true })
+      const onAbort = (): void => { finish('cancelled') }
+      if (req.signal?.aborted === true) {
+        finish('cancelled')
+        return
       }
-      timer = setTimeout(() => finish('cancelled'), 5 * 60 * 1000)
-      pendingApproval = { senderId: currentQqTarget.targetId, resolve: finish }
+      req.signal?.addEventListener('abort', onAbort, { once: true })
+      pendingApproval = { senderId: target.targetId ?? '', resolve: finish }
       const text = `⚠️ 需要审批\n${describeToolCall(req)}\n请回复「允许」或「拒绝」`
-      bot.sendText(currentQqTarget, text).catch((error) => {
+      void live.sendText(target, text).catch((error: unknown) => {
         console.error('[qqbot] approval send failed:', error)
         finish(null)
       })
     })
   }
 
-  function registerApprovalAnswerer() {
-    ctx.on('approval/request', async (req, next) => {
-      if (!dailyAgentIds.has(String(req.agent && req.agent.id))) return next()
-      if (!currentQqTarget || currentQqTarget.scope !== 'c2c' || !bot) return next()
-      try {
-        const outcome = await answerQqApproval(req)
-        if (outcome === null) return next()
-        return outcome
-      } catch (error) {
-        console.error('[qqbot] approval answer failed:', error)
-        return next()
-      }
-    }, { prepend: true })
-  }
+  ctx.on('approval/request', async (req, next) => {
+    if (!dailyAgentIds.has(String(req.agent.id))) return next()
+    if (currentTarget?.scope !== 'c2c' || bot === undefined) return next()
+    try {
+      const outcome = await answerQqApproval(req)
+      return outcome ?? await next()
+    } catch (error) {
+      console.error('[qqbot] approval answer failed:', error)
+      return next()
+    }
+  }, { prepend: true })
 
-  async function forwardMessage(msg) {
+  async function forwardMessage(message: QqInboundMessage): Promise<void> {
     if (!targetWorkspaceId) {
       console.error('[qqbot] no target workspace; dropping message')
       return
     }
-    if (!bot) return
-    if (msg.kind !== 'c2c' && !ALLOW_NON_C2C) {
-      console.error('[qqbot] dropping non-c2c message (set QQBOT_ALLOW_GROUP=true to allow)')
+    const live = bot
+    if (live === undefined) return
+    if (message.kind !== 'c2c' && !config.allowNonC2c) {
+      console.error('[qqbot] dropping non-c2c message (set allowNonC2c: true to allow)')
       return
     }
-    const sender = String(msg.senderId || 'unknown')
-    const senderLabel = sender.replace(/[\[\]\r\n]/g, '')
-    if (!isTrustedSender(sender)) {
-      console.error('[qqbot] dropping message from untrusted sender', senderLabel)
+    const sender = message.senderId ?? 'unknown'
+    const trust = trustSender(sender, allowedSenders)
+    if (!trust.trusted) {
+      console.error('[qqbot] dropping message from untrusted sender', sender.replace(/[[\]\r\n]/g, ''))
       return
     }
-    const kind = msg.kind === 'group' ? 'QQ群' : msg.kind === 'c2c' ? 'QQ' : 'QQ频道'
-    const text = buildText(msg)
-    const atts = Array.isArray(msg.attachments) ? msg.attachments : []
+    if (trust.firstTrust !== undefined) {
+      allowedSenders = [trust.firstTrust]
+      persistAllowedSenders()
+      console.log('[qqbot] trusted first sender', trust.firstTrust)
+    }
 
-    let attachment = null
-    let imageAttached = false
-    const imageAtt = atts.find(a => a && typeof a.content_type === 'string' && a.content_type.startsWith('image/') && a.url)
-    if (imageAtt && await modelSupportsImages()) {
-      const img = await downloadImage(imageAtt)
-      if (img) {
+    const imageAtt = firstImageAttachment(message.attachments ?? [])
+    let imageInlined = false
+    const content: ContentBlock[] = []
+    if (imageAtt?.url !== undefined && await imageSupport()) {
+      const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+      const attachments = ctx.get('attachments')
+      if (image !== null && attachments !== undefined) {
         try {
-          const attachments = ctx.get('attachments')
-          if (attachments !== undefined) {
-            attachment = await attachments.saveImage(img)
-            imageAttached = true
-          }
+          content.push({ type: 'image', attachment: await attachments.saveImage(image) })
+          imageInlined = true
         } catch (error) {
           console.error('[qqbot] saveImage failed:', error)
-          attachment = null
-          imageAttached = false
         }
       }
     }
+    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined) })
 
-    const head = [`[${kind} · ${senderLabel}]`]
-    if (text) {
-      head.push(sanitizeInbound(text))
-    } else {
-      for (const a of atts) {
-        if (!a || typeof a !== 'object') continue
-        if (a === imageAtt && imageAttached) continue
-        if (a.asr_refer_text) continue
-        head.push(sanitizeInbound(mediaSummary(a)))
-      }
-      if (head.length === 1) head.push('(无文本内容)')
-    }
-
-    const content = [{ type: 'text', text: head.join('\n') }]
-    if (attachment) content.push({ type: 'image', attachment })
-
-    currentQqTarget = msg.replyTarget
+    currentTarget = message.replyTarget
+    const followup = createUserMessage({
+      content,
+      source: { kind: 'plugin', plugin: SOURCE_PLUGIN },
+    })
     try {
-      const agent = await ensureDailyAgent(targetWorkspaceId)
-      const startSeq = agent.session.events.length
-      agent.followup({
-        id: makeId('qqmsg'),
-        role: 'user',
-        content,
-        source: { kind: 'plugin', plugin: SOURCE_PLUGIN },
-      })
-      await agent.whenIdle()
-      const replyText = collectAssistantText(agent.session.events, startSeq)
-      if (replyText && bot) {
+      const agent = await ensureDailyAgent(ctx, targetWorkspaceId, dailyAgentIds)
+      const collector = collectAssistantReply(agent, followup.id)
+      agent.followup(followup)
+      const replyText = await collector.done()
+      if (replyText) {
         try {
-          await bot.sendText(msg.replyTarget, replyText)
+          await live.sendText(message.replyTarget, replyText)
         } catch (error) {
           console.error('[qqbot] send reply failed:', error)
         }
       }
     } finally {
-      currentQqTarget = null
+      currentTarget = undefined
     }
   }
 
-  // ---- settings-driven binding ----
-  function applySettings() {
-    const settings = getSettings()
-    if (settings === undefined) return
-    const val = settings.get(QQ_NS) || {}
-    const appId = String(val.appId || '').trim()
-    const appSecret = String(val.appSecret || '').trim()
-    const workspaceId = String(val.workspaceId || '')
-    if (workspaceId) targetWorkspaceId = workspaceId
-    if (Array.isArray(val.allowedSenders)) {
-      allowedSenders = val.allowedSenders.filter(v => typeof v === 'string' && v && v !== 'unknown')
-    }
-    const curId = bound ? bound.appId : null
-    const curSecret = bound ? bound.appSecret : null
-    if (appId && appSecret) {
-      if (appId !== curId || appSecret !== curSecret) {
-        bound = { appId, appSecret }
-        startBot(appId, appSecret)
-        console.log('[qqbot] bound', appId)
-      }
-    } else if (bound) {
-      stopBot()
-      bound = null
-    }
-  }
-
-  // ---- model tools ----
-  ctx.tools.register({
-    name: 'qqbot_status',
-    description: '查询 QQ 机器人绑定/连接状态。',
-    parameters: { type: 'object', properties: {} },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          bound: { type: 'boolean' },
-          appId: { type: 'string' },
-          connected: { type: 'boolean' },
-          workspaceId: { type: 'string' },
-          allowedSenders: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['bound', 'connected'],
-      },
-      render(_args, value) {
-        const s = value.bound ? `已绑定 AppID: ${value.appId}` : '未绑定'
-        return [{ type: 'text', text: `${s}${value.connected ? '，网关已连接' : ''}` }]
-      },
-    },
-    async execute() {
-      const s = getState()
-      return {
-        bound: s.bound,
-        appId: s.appId || '',
-        connected: s.connected,
-        workspaceId: s.targetWorkspaceId || '',
-        allowedSenders: s.allowedSenders,
-      }
-    },
+  ctx.on('settings/updated', (ns) => {
+    if (ns === QQ_NS) applySettings()
   })
-
-  ctx.tools.register({
-    name: 'qqbot_unbind',
-    description: '解绑 QQ 机器人并断开连接。',
-    parameters: { type: 'object', properties: {} },
-    output: {
-      schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
-      render(_args, value) {
-        return [{ type: 'text', text: value.ok ? '已解绑' : '解绑失败' }]
-      },
-    },
-    async execute() {
-      const settings = getSettings()
-      if (settings !== undefined) {
-        await settings.update(QQ_NS, { appId: '', appSecret: '', workspaceId: '', allowedSenders: [] }).catch(() => {})
-      }
-      return { ok: true }
-    },
-  })
-
-  ctx.tools.register({
-    name: 'qqbot_list_workspaces',
-    description: '列出可选的目标工作区（id / 标题 / 路径），用于 QQ 机器人绑定选择。',
-    parameters: { type: 'object', properties: {} },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          workspaces: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: { id: { type: 'string' }, title: { type: 'string' }, path: { type: 'string' } },
-              required: ['id'],
-            },
-          },
-        },
-        required: ['workspaces'],
-      },
-      render(_args, value) {
-        const list = Array.isArray(value.workspaces) ? value.workspaces : []
-        return [{ type: 'text', text: list.map(w => `${w.id}\t${w.title}\t${w.path}`).join('\n') || '(无工作区)' }]
-      },
-    },
-    async execute() {
-      const wr = ctx.get('workspaceRegistry')
-      if (wr === undefined) return { workspaces: [] }
-      const list = wr.list()
-      if (!Array.isArray(list)) return { workspaces: [] }
-      return { workspaces: list.map(w => ({ id: w.id, title: w.title, path: w.path })) }
-    },
-  })
-
-  // ---- startup ----
-  ctx.inject(['settings'], (sctx) => {
-    sctx.settings.register(QQ_NS, QQ_SCHEMA)
-    sctx.on('settings/updated', (ns) => {
-      if (ns === QQ_NS) applySettings()
-    })
-    applySettings()
-  })
-  registerApprovalAnswerer()
+  applySettings()
   ctx.effect(() => stopBot, 'qqbot-clawbot.lifecycle')
+}
+
+function emptySettings(): QqBotSettings {
+  return { appId: '', appSecret: '', workspaceId: '', allowedSenders: [] }
+}
+
+function describeToolCall(req: ApprovalRequest): string {
+  const lines = [`工具: ${req.toolName}`]
+  const events = req.agent.session.events
+  if (req.callId !== undefined) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type === 'tool/call' && event.data.callId === req.callId) {
+        const args = event.data.arguments
+        if (args && args !== '{}') lines.push(`参数: ${args.length > 600 ? `${args.slice(0, 600)}…` : args}`)
+        break
+      }
+    }
+  }
+  if (req.reason) lines.push(`原因: ${req.reason}`)
+  return lines.join('\n')
+}
+
+function createImageSupportProbe(ctx: Context): () => Promise<boolean> {
+  let resolved = false
+  let supports = false
+  return async () => {
+    if (resolved) return supports
+    resolved = true
+    try {
+      const selection = ctx.get('agentDefaultModel')?.currentSelection()
+      const llm = ctx.get('llm')
+      if (selection?.provider && selection.model && llm !== undefined) {
+        const info = await llm.resolveModelInfo(selection.provider, selection.model)
+        supports = info.inputModalities?.includes('image') === true
+      }
+    } catch (error) {
+      console.error('[qqbot] model image support check failed:', error)
+    }
+    return supports
+  }
+}
+
+/**
+ * Download one inbound image through the host HTTPS client.
+ * @param url - already host-checked URL.
+ * @param maxBytes - complete-body byte cap.
+ * @param timeoutMs - abort deadline.
+ * @returns image bytes and sniffed MIME type, or `null` when admission fails.
+ */
+export async function downloadImage(
+  url: string,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<{ data: Uint8Array; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' } | null> {
+  if (!isAllowedMediaUrl(url)) return null
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error' })
+    if (!response.ok || response.body === null) return null
+    const declared = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > maxBytes) return null
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for await (const chunk of response.body) {
+      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      total += bytes.length
+      if (total > maxBytes) return null
+      chunks.push(bytes)
+    }
+    const data = concatBytes(chunks, total)
+    const mediaType = sniffImageType(data)
+    if (mediaType === null) return null
+    return { data, mediaType }
+  } catch (error) {
+    console.error('[qqbot] image download failed:', error)
+    return null
+  }
+}
+
+function concatBytes(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.length
+  }
+  return out
+}
+
+/**
+ * Resume or create the per-day agent for the bound workspace.
+ * @param ctx - host context.
+ * @param workspaceId - settings-selected workspace id.
+ * @param dailyAgentIds - set that records every session this driver owns for approval routing.
+ * @returns the live agent.
+ */
+export async function ensureDailyAgent(
+  ctx: Context,
+  workspaceId: string,
+  dailyAgentIds: Set<string>,
+): Promise<import('@deepseek-ai/dsh-agent').Agent> {
+  const baseId = dailySessionId()
+  let sessionId = SessionId(baseId)
+  let existing = ctx.agents.get(sessionId)
+  if (existing !== undefined && existing.options.model === undefined) {
+    sessionId = SessionId(`${baseId}-r${Date.now().toString(36)}`)
+    existing = undefined
+  }
+  dailyAgentIds.add(sessionId)
+  if (existing !== undefined) return existing
+
+  const workspace = ctx.get('workspaceRegistry')?.get(WorkspaceId(workspaceId))
+  const cwd = workspace?.path ?? ctx.get('sandboxPolicy')?.workspaceRoot
+  if (cwd === undefined) throw new Error(`cannot resolve workspace cwd for ${workspaceId}`)
+
+  const selection = ctx.get('agentDefaultModel')?.currentSelection()
+  const agentOptions = selection?.provider && selection.model
+    ? { provider: selection.provider, model: selection.model }
+    : undefined
+
+  let presetId: string | undefined
+  const presets = ctx.get('agentPresets')
+  if (presets !== undefined) {
+    try {
+      presetId = (await presets.resolve(undefined)).id
+    } catch (error) {
+      console.error('[qqbot] preset resolve failed; creating without preset:', error)
+    }
+  }
+  const setup = presets !== undefined && presetId !== undefined
+    ? async (agentCtx: Context) => { await presets.mount(agentCtx, presetId) }
+    : undefined
+
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence !== undefined) {
+    try {
+      const headers = await persistence.list()
+      if (headers.some(header => header.id === sessionId)) {
+        const handle = await ctx.agents.resume({
+          resumeSessionId: sessionId,
+          ...agentOptions === undefined ? {} : { agentOptions },
+          ...setup === undefined ? {} : { setup },
+        })
+        return handle.agent
+      }
+    } catch (error) {
+      console.error('[qqbot] resume check failed; will create fresh:', error)
+    }
+  }
+
+  const handle = await ctx.agents.create({
+    sessionId,
+    ...agentOptions === undefined ? {} : { agentOptions },
+    meta: { cwd, ...presetId === undefined ? {} : { agentPreset: presetId } },
+    ...setup === undefined ? {} : { setup },
+  })
+  if (workspace !== undefined) {
+    try {
+      await workspace.attachSession(sessionId)
+    } catch (error) {
+      console.error('[qqbot] attach session failed:', error)
+    }
+  }
+  try {
+    ctx.get('sessionTitle')?.rename(handle.agent.session, `QQ · ${dailySessionId().slice('qqbot-'.length)}`)
+  } catch (error) {
+    console.error('[qqbot] session rename failed:', error)
+  }
+  return handle.agent
 }

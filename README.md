@@ -1,46 +1,67 @@
-# QQ Bot Bridge
+# @deepseek-ai/dsh-qqbot-clawbot
 
-A persistent [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) host plugin that connects a QQ Open Platform robot (AppID + AppSecret) and bridges its messages into a per-day session of a chosen workspace.
+English | [中文](README.zh.md)
 
-## Features
+QQ Open Platform protocol driver. It binds one robot from the `qqbot` settings namespace and forwards inbound C2C messages into a per-day harness session of a chosen workspace.
 
-- **Binding** — Settings → QQ Bot in the web UI (AppID + AppSecret with an eye toggle); the host half starts the WebSocket gateway on change.
-- **Bidirectional bridge** — forwards inbound text / voice transcription / images into a `qqbot-YYYY-MM-DD` session and sends the agent's reply back to QQ.
-- **Persistence** — AppID / Secret / workspace / sender allowlist in `$DSH_HOME/qqbot-clawbot/state.json` (mode 600); reconnects on restart.
-- **Sender allowlist (TOFU)** — the first sender after binding is trusted; others are dropped.
-- **C2C only by default** — TOFU assumes the first sender is the owner, which is unsafe in groups. Group / guild / dm messages are dropped unless `QQBOT_ALLOW_GROUP=true` (still TOFU-gated).
-- **Media hardening** — image download restricted to Tencent CDN hosts, capped at 20 MB. Images attach inline only when the target model supports vision.
-- **Human-in-the-loop (HITL) approval** — escalating a sandboxed action prompts `⚠️ 需要审批 … 回复「允许」或「拒绝」` in QQ with the tool's arguments; the tool blocks until you reply. C2C chats only — group-triggered approvals fall through to the web UI.
+This package is a transport adapter, not a capability seam. Binding, workspace choice, and the sender allowlist live in the settings document; the host plugin reconnects when that namespace changes. It does not register model-facing tools.
 
-## Tools
+## Binding
 
-| Tool | Purpose |
-| --- | --- |
-| `qqbot_list_workspaces` | list candidate workspaces |
-| `qqbot_status()` | query binding/connection status |
-| `qqbot_unbind()` | unbind and disconnect |
+Settings → QQ Bot in the web UI stores AppID, AppSecret, workspace id, and the sender allowlist in the `qqbot` namespace. `appSecret` is a `role('secret')` field: wire describes never return the literal, and a form that leaves the field blank keeps the stored secret.
 
-Binding is done from the web UI: Settings → QQ Bot (AppID / AppSecret / workspace), stored in the `qqbot` settings namespace; the host half auto-connects on change.
+The host plugin starts the WebSocket gateway when the resolved section carries a non-empty AppID and AppSecret, and stops it when either is cleared.
+
+## Inbound contract
+
+- **C2C only by default** — group, guild, and DM messages are dropped unless `allowNonC2c: true`. TOFU trusts the first sender, which in a group is the first member to mention the bot.
+- **Sender allowlist (TOFU)** — the first real sender after binding is recorded; later strangers are dropped. `unknown` never becomes the first trust.
+- **Inbound framing** — each follow-up is a `createUserMessage` with `source: { kind: 'plugin', plugin: 'qqbot-clawbot' }`. The model-visible text starts with `[QQ · <sender>]`; inbound copies of that prefix are rewritten so they cannot spoof it.
+- **Reply** — the driver listens to `session/event` for committed `assistant/message` text after that follow-up, then waits for `whenIdle()` and sends the last committed text back to QQ. Uncommitted chunks are not replies.
+- **Images** — HTTPS URLs on Tencent CDN hosts, capped by `maxImageBytes`, attach inline only when the default model declares image input.
+- **HITL** — `approval/request` for a daily QQ agent in an active C2C chat is answered in QQ (`允许` / `拒绝`); other chats fall through to the next answerer.
+
+The daily session id is `qqbot-YYYY-MM-DD` in the host local timezone.
+
+## Configuration
+
+| Field | Default | Meaning |
+|---|---|---|
+| `allowNonC2c` | `false` | Accept group, guild, and DM messages. |
+| `maxImageBytes` | `20971520` | Hard cap on one inbound image body. |
+| `apiTimeoutMs` | `15000` | Abort an inbound image download after this many milliseconds. |
+| `approvalTimeoutMs` | `300000` | Withdraw a QQ-side approval prompt after this many milliseconds. |
 
 ## Install
 
-This package builds inside a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) workspace checkout.
+The web profile mounts this package from `dsh-web-app`. A custom profile inserts:
 
-1. Place (or symlink) this directory at `packages/qqbot/qqbot-clawbot` in the harness repo, then run `pnpm install` at the repo root.
-2. Build the two halves:
+```yaml
+- insert:
+    - id: qqbot-clawbot
+      name: '@deepseek-ai/dsh-qqbot-clawbot'
+```
 
-   ```sh
-   node_modules/.bin/tsc -b packages/qqbot/qqbot-clawbot/tsconfig.client.json
-   cd packages/qqbot/qqbot-clawbot && ../../../node_modules/.bin/tsdown --env.DSH_BUILD_FACE client
-   ```
+Create a robot at [q.qq.com](https://q.qq.com/), restart `dsh web`, and enter AppID / AppSecret under Settings → QQ Bot.
 
-3. Create a robot at [q.qq.com](https://q.qq.com/) and copy its AppID + AppSecret.
-4. Register the plugin by package name in `~/.dsh/profiles/web/cordis.patch.yml`:
+## Model Experience
 
-   ```yaml
-   - insert:
-       - id: qqbot-clawbot
-         name: '@deepseek-ai/dsh-qqbot-clawbot'
-   ```
+### Inbound follow-up
 
-5. Restart `dsh web`, open Settings → QQ Bot, and enter the AppID + AppSecret (eye toggle reveals the secret).
+#### What the model sees
+
+Each admitted QQ message becomes one `user/message` whose text starts with `[QQ · <sender>]` or `[QQ群 · <sender>]` / `[QQ频道 · <sender>]`, then the inbound body. Inbound copies of `[QQ` are rewritten to `［QQ`. Voice attachments contribute `[语音转文字] …`. An image that the default model accepts appears as a sibling image block; other media become placeholders such as `[图片]`. Protocol metadata never enters the request.
+
+#### Token effect
+
+Prompt tokens are data-dependent and remain in that day's session history until compaction.
+
+#### KV Cache effect
+
+Append-only. Each inbound follow-up is a new user message after the reusable request prefix.
+
+## Known Limitations and Deferred Work
+
+- **One robot, one daily session** — a single gateway and one `qqbot-YYYY-MM-DD` session per process; concurrent C2C chats share that session.
+- **Secret slots are write-only on the wire** — the settings page treats a stored AppID as bound and never echoes AppSecret.
+- **Group admission is off by default** — TOFU is unsafe when the first speaker is not the owner.
