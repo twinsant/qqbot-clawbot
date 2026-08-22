@@ -4,14 +4,28 @@
  * Export discipline: packages/client/AGENTS.md.
  */
 
+import { useSyncExternalStore } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { QqBotSettings } from '../types.ts'
 import { QqBotSection } from './QqBotSection.tsx'
 import type { QqBotSectionInjected } from './QqBotSection.tsx'
 import { en, zh, type QqBotKey } from './locales.ts'
+
+function bindSnapshotSelector<T>(source: {
+  subscribe: (listener: () => void) => () => void
+  getSnapshot: () => T
+}): SnapshotSelectorHook<T> {
+  return function useSelector<S>(sel: (s: T) => S): S {
+    return useSyncExternalStore(
+      source.subscribe,
+      () => sel(source.getSnapshot()),
+      () => sel(source.getSnapshot()),
+    )
+  }
+}
 
 export type { QqBotSectionInjected, QqBotSectionProps } from './QqBotSection.tsx'
 export type { QqBotKey } from './locales.ts'
