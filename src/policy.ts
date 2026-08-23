@@ -7,7 +7,7 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { InboundImageNote, QqAttachment, QqInboundMessage } from './types.ts'
 
 /** Default hosts the driver will fetch inbound images from. */
-export const DEFAULT_IMAGE_HOSTS = ['qq.com', 'gtimg.com', 'myqcloud.com', 'qpic.cn'] as const
+export const DEFAULT_IMAGE_HOSTS = ['qq.com', 'qq.com.cn', 'gtimg.com', 'myqcloud.com', 'qpic.cn'] as const
 
 /** Result of evaluating one sender against the TOFU allowlist. */
 export interface TrustDecision {
