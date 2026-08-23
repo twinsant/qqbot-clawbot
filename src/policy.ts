@@ -151,11 +151,17 @@ export function trustSender(sender: string, allowedSenders: readonly string[]): 
  * Build the model-visible inbound body, including media placeholders when there is no text.
  * @param message - inbound payload.
  * @param imageInlined - true when the first image was persisted as an attachment block.
+ * @param imageDescription - optional local-Ollama description of the first image when the model lacks vision.
  * @returns framed text the model sees.
  */
-export function formatInboundBody(message: QqInboundMessage, imageInlined: boolean): string {
+export function formatInboundBody(
+  message: QqInboundMessage,
+  imageInlined: boolean,
+  imageDescription?: string,
+): string {
   const sender = (message.senderId ?? 'unknown').replace(/[[\]\r\n]/g, '')
   const head = [`[${kindLabel(message.kind)} · ${sender}]`]
+  if (imageDescription !== undefined) head.push(`[图片：${sanitizeInbound(imageDescription)}]`)
   const text = buildInboundText(message)
   if (text) {
     head.push(sanitizeInbound(text))
@@ -163,7 +169,7 @@ export function formatInboundBody(message: QqInboundMessage, imageInlined: boole
   }
   const imageAtt = firstImageAttachment(message.attachments ?? [])
   for (const attachment of message.attachments ?? []) {
-    if (attachment === imageAtt && imageInlined) continue
+    if (attachment === imageAtt && (imageInlined || imageDescription !== undefined)) continue
     if (attachment.asr_refer_text) continue
     head.push(sanitizeInbound(mediaSummary(attachment)))
   }

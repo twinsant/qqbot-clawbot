@@ -53,6 +53,9 @@ const SOURCE_PLUGIN = 'qqbot-clawbot'
 const MARKDOWN_SUPPORT = false
 const API_BASE_URL = 'https://api.sgroup.qq.com'
 const TOKEN_BASE_URL = 'https://bots.qq.com'
+// Local Ollama vision fallback for text-only models (same as the WeChat bridge).
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL ?? 'qwen3.8:27b-mlx'
+const OLLAMA_VISION_TIMEOUT_MS = 60_000
 
 /**
  * Adapt the official SDK instance to the narrow gateway this plugin drives.
@@ -230,20 +233,31 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
 
     const imageAtt = firstImageAttachment(message.attachments ?? [])
     let imageInlined = false
+    let imageDescription: string | undefined
     const content: ContentBlock[] = []
-    if (imageAtt?.url !== undefined && await imageSupport()) {
-      const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
-      const attachments = ctx.get('attachments')
-      if (image !== null && attachments !== undefined) {
-        try {
-          content.push({ type: 'image', attachment: await attachments.saveImage(image) })
-          imageInlined = true
-        } catch (error) {
-          console.error('[qqbot] saveImage failed:', error)
+    if (imageAtt?.url !== undefined) {
+      if (await imageSupport()) {
+        const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+        const attachments = ctx.get('attachments')
+        if (image !== null && attachments !== undefined) {
+          try {
+            content.push({ type: 'image', attachment: await attachments.saveImage(image) })
+            imageInlined = true
+          } catch (error) {
+            console.error('[qqbot] saveImage failed:', error)
+          }
+        }
+      } else {
+        // Text-only model: describe the image through local Ollama so the agent
+        // still receives its content as readable text instead of a bare placeholder.
+        const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+        if (image !== null) {
+          const description = await describeImageBytes(image.data)
+          if (description !== null) imageDescription = description
         }
       }
     }
-    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined) })
+    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined, imageDescription) })
 
     currentTarget = message.replyTarget
     const followup = createUserMessage({
@@ -359,6 +373,38 @@ function concatBytes(chunks: readonly Uint8Array[], total: number): Uint8Array {
     offset += chunk.length
   }
   return out
+}
+
+/**
+ * Describe one encoded image through the local Ollama vision endpoint so a
+ * text-only model still receives its content as readable text.
+ * @param data - encoded image bytes.
+ * @returns a short Chinese description, or `null` when the endpoint is unavailable.
+ */
+export async function describeImageBytes(data: Uint8Array): Promise<string | null> {
+  if (data.length === 0) return null
+  try {
+    const response = await fetch('http://localhost:11434/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_VISION_MODEL,
+        prompt: '用一句中文描述这张图片的内容，不要猜测不存在的内容。',
+        images: [Buffer.from(data).toString('base64')],
+        stream: false,
+        think: false,
+        options: { num_predict: 80, temperature: 0.2 },
+      }),
+      signal: AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS),
+    })
+    if (!response.ok) return null
+    const payload = await response.json() as { response?: unknown }
+    const text = String(payload.response ?? '').trim()
+    return text || null
+  } catch (error) {
+    console.error('[qqbot] vision describe failed:', error instanceof Error ? error.message : error)
+    return null
+  }
 }
 
 /**
