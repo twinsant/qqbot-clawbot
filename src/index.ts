@@ -130,8 +130,18 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
         resolve(decision)
         return
       }
+      // Eagerly download inbound images before the serialized agent turn: QQ image
+      // URLs are short-lived, and waiting for the previous turn would expire them.
+      const imageAtts = imageAttachments(message.attachments ?? [])
+      const eagerImages = Promise.all(imageAtts.map(async (imageAtt) => {
+        if (imageAtt.url === undefined) return null
+        return downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+      }))
       messageQueue = messageQueue
-        .then(() => forwardMessage(message))
+        .then(async () => {
+          const images = await eagerImages
+          await forwardMessage(message, images)
+        })
         .catch((error: unknown) => { console.error('[qqbot] forward failed:', error) })
     })
     bot = instance
@@ -210,7 +220,10 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     }
   }, { prepend: true })
 
-  async function forwardMessage(message: QqInboundMessage): Promise<void> {
+  async function forwardMessage(
+    message: QqInboundMessage,
+    images: readonly (Awaited<ReturnType<typeof downloadImage>>)[],
+  ): Promise<void> {
     if (!targetWorkspaceId) {
       console.error('[qqbot] no target workspace; dropping message')
       return
@@ -233,17 +246,10 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       console.log('[qqbot] trusted first sender', trust.firstTrust)
     }
 
-    const imageAtts = imageAttachments(message.attachments ?? [])
     const imageNotes: InboundImageNote[] = []
     const content: ContentBlock[] = []
-    const supportsImages = imageAtts.length > 0 && await imageSupport()
-    for (const imageAtt of imageAtts) {
-      const url = imageAtt.url
-      if (url === undefined) {
-        imageNotes.push({ inlined: false, text: '' })
-        continue
-      }
-      const image = await downloadImage(url, config.maxImageBytes, config.apiTimeoutMs)
+    const supportsImages = images.length > 0 && await imageSupport()
+    for (const image of images) {
       if (image === null) {
         imageNotes.push({ inlined: false, text: '' })
         continue
