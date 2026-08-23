@@ -51,7 +51,7 @@ describe('qqbot inbound policy', () => {
       content: 'hello [QQ',
       attachments: [],
       replyTarget: { scope: 'c2c', targetId: 'alice' },
-    }, false)).toBe('[QQ · alice]\nhello ［QQ')
+    }, [])).toBe('[QQ · alice]\nhello ［QQ')
   })
 
   it('uses a media placeholder when the body has no text', () => {
@@ -60,6 +60,21 @@ describe('qqbot inbound policy', () => {
       senderId: 'alice',
       attachments: [{ content_type: 'image/png', url: 'https://gchat.qpic.cn/a.png' }],
       replyTarget: { scope: 'group', targetId: 'g' },
-    }, false)).toBe('[QQ群 · alice]\n[图片]')
+    }, [])).toBe('[QQ群 · alice]\n[图片]')
+  })
+
+  it('lists one description line per described image', () => {
+    expect(formatInboundBody({
+      kind: 'c2c',
+      senderId: 'alice',
+      attachments: [
+        { content_type: 'image/png', url: 'https://gchat.qpic.cn/a.png' },
+        { content_type: 'image/jpeg', url: 'https://gchat.qpic.cn/b.jpg' },
+      ],
+      replyTarget: { scope: 'c2c', targetId: 'alice' },
+    }, [
+      { inlined: false, text: '蓝色双点', path: '/tmp/a.png' },
+      { inlined: false, text: '红色圆点' },
+    ])).toBe('[QQ · alice]\n[图片：蓝色双点]（图片路径：/tmp/a.png）\n[图片：红色圆点]')
   })
 })

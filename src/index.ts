@@ -23,10 +23,10 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Config } from './schema.ts'
-import type { QqBotSettings, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
+import type { InboundImageNote, QqBotSettings, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
 import {
   dailySessionId,
-  firstImageAttachment,
+  imageAttachments,
   formatInboundBody,
   isAllowedMediaUrl,
   parseApprovalDecision,
@@ -233,36 +233,47 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       console.log('[qqbot] trusted first sender', trust.firstTrust)
     }
 
-    const imageAtt = firstImageAttachment(message.attachments ?? [])
-    let imageInlined = false
-    let imageDescription: string | undefined
-    let imagePath: string | undefined
+    const imageAtts = imageAttachments(message.attachments ?? [])
+    const imageNotes: InboundImageNote[] = []
     const content: ContentBlock[] = []
-    if (imageAtt?.url !== undefined) {
-      if (await imageSupport()) {
-        const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+    const supportsImages = imageAtts.length > 0 && await imageSupport()
+    for (const imageAtt of imageAtts) {
+      const url = imageAtt.url
+      if (url === undefined) {
+        imageNotes.push({ inlined: false, text: '' })
+        continue
+      }
+      const image = await downloadImage(url, config.maxImageBytes, config.apiTimeoutMs)
+      if (image === null) {
+        imageNotes.push({ inlined: false, text: '' })
+        continue
+      }
+      if (supportsImages) {
         const attachments = ctx.get('attachments')
-        if (image !== null && attachments !== undefined) {
-          try {
-            content.push({ type: 'image', attachment: await attachments.saveImage(image) })
-            imageInlined = true
-          } catch (error) {
-            console.error('[qqbot] saveImage failed:', error)
-          }
+        if (attachments === undefined) {
+          imageNotes.push({ inlined: false, text: '' })
+          continue
+        }
+        try {
+          content.push({ type: 'image', attachment: await attachments.saveImage(image) })
+          imageNotes.push({ inlined: true, text: '' })
+        } catch (error) {
+          console.error('[qqbot] saveImage failed:', error)
+          imageNotes.push({ inlined: false, text: '' })
         }
       } else {
-        // Text-only model: describe the image through local Ollama and mirror it
-        // under the workspace so the agent reads this image, not a stale WeChat one.
-        const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
-        if (image !== null) {
-          const description = await describeImageBytes(image.data)
-          if (description !== null) imageDescription = description
-          const mirrorPath = mirrorImage(resolveWorkspacePath(ctx, targetWorkspaceId), image.data, image.mediaType, 'qqbot-inbox')
-          if (mirrorPath !== null) imagePath = mirrorPath
-        }
+        // Text-only model: describe and mirror each image through local Ollama so
+        // the agent reads these images, not a stale WeChat one.
+        const description = await describeImageBytes(image.data)
+        const mirrorPath = mirrorImage(resolveWorkspacePath(ctx, targetWorkspaceId), image.data, image.mediaType, 'qqbot-inbox')
+        imageNotes.push({
+          inlined: false,
+          text: description ?? '',
+          ...(mirrorPath !== null ? { path: mirrorPath } : {}),
+        })
       }
     }
-    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined, imageDescription, imagePath) })
+    content.unshift({ type: 'text', text: formatInboundBody(message, imageNotes) })
 
     currentTarget = message.replyTarget
     const followup = createUserMessage({

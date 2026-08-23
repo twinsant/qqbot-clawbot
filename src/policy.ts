@@ -4,7 +4,7 @@
  */
 
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
-import type { QqAttachment, QqInboundMessage } from './types.ts'
+import type { InboundImageNote, QqAttachment, QqInboundMessage } from './types.ts'
 
 /** Default hosts the driver will fetch inbound images from. */
 export const DEFAULT_IMAGE_HOSTS = ['qq.com', 'gtimg.com', 'myqcloud.com', 'qpic.cn'] as const
@@ -150,32 +150,30 @@ export function trustSender(sender: string, allowedSenders: readonly string[]): 
 /**
  * Build the model-visible inbound body, including media placeholders when there is no text.
  * @param message - inbound payload.
- * @param imageInlined - true when the first image was persisted as an attachment block.
- * @param imageDescription - optional local-Ollama description of the first image when the model lacks vision.
- * @param imagePath - optional on-disk mirror path for the first image.
+ * @param imageNotes - per-image handling results, in image-attachment order.
  * @returns framed text the model sees.
  */
-export function formatInboundBody(
-  message: QqInboundMessage,
-  imageInlined: boolean,
-  imageDescription?: string,
-  imagePath?: string,
-): string {
+export function formatInboundBody(message: QqInboundMessage, imageNotes: readonly InboundImageNote[]): string {
   const sender = (message.senderId ?? 'unknown').replace(/[[\]\r\n]/g, '')
   const head = [`[${kindLabel(message.kind)} · ${sender}]`]
-  if (imageDescription !== undefined) {
-    const label = `[图片：${sanitizeInbound(imageDescription)}]`
-    head.push(imagePath !== undefined ? `${label}（图片路径：${imagePath}）` : label)
+  for (const note of imageNotes) {
+    if (note.inlined || note.text === '') continue
+    const pathSuffix = note.path !== undefined ? `（图片路径：${note.path}）` : ''
+    head.push(`[图片：${sanitizeInbound(note.text)}]${pathSuffix}`)
   }
   const text = buildInboundText(message)
   if (text) {
     head.push(sanitizeInbound(text))
     return head.join('\n')
   }
-  const imageAtt = firstImageAttachment(message.attachments ?? [])
+  const imageAtts = imageAttachments(message.attachments ?? [])
   for (const attachment of message.attachments ?? []) {
-    if (attachment === imageAtt && (imageInlined || imageDescription !== undefined)) continue
     if (attachment.asr_refer_text) continue
+    const imageIndex = imageAtts.indexOf(attachment)
+    if (imageIndex >= 0) {
+      const note = imageNotes[imageIndex]
+      if (note !== undefined && (note.inlined || note.text !== '')) continue
+    }
     head.push(sanitizeInbound(mediaSummary(attachment)))
   }
   if (head.length === 1) head.push('(无文本内容)')
@@ -183,12 +181,12 @@ export function formatInboundBody(
 }
 
 /**
- * First image-typed attachment that carries a URL.
+ * Image-typed attachments that carry a URL, in attachment order.
  * @param attachments - inbound attachments.
- * @returns the first image candidate, if any.
+ * @returns the image candidates.
  */
-export function firstImageAttachment(attachments: readonly QqAttachment[]): QqAttachment | undefined {
-  return attachments.find(attachment =>
+export function imageAttachments(attachments: readonly QqAttachment[]): QqAttachment[] {
+  return attachments.filter(attachment =>
     typeof attachment.content_type === 'string'
     && attachment.content_type.startsWith('image/')
     && Boolean(attachment.url))

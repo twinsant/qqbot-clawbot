@@ -74,3 +74,13 @@ export interface QqBotSettings {
 
 /** Factory that turns AppID and AppSecret into a live gateway. */
 export type QqGatewayFactory = (appId: string, appSecret: string) => QqGateway
+
+/** How one inbound image was handled for the model-visible body. */
+export interface InboundImageNote {
+  /** True when the image was persisted as an attachment content block. */
+  readonly inlined: boolean
+  /** Local-Ollama description; empty when unavailable or inlined. */
+  readonly text: string
+  /** On-disk mirror path; present when the image was mirrored. */
+  readonly path?: string
+}
