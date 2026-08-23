@@ -46,7 +46,7 @@ export function dailySessionId(now?: Date): string {
 export function isAllowedMediaUrl(url: string, hosts: readonly string[] = DEFAULT_IMAGE_HOSTS): boolean {
   try {
     const parsed = new URL(url)
-    if (parsed.protocol !== 'https:') return false
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
     return hosts.some(host => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))
   } catch {
     return false

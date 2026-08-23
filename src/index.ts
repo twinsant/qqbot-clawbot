@@ -134,8 +134,18 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       // URLs are short-lived, and waiting for the previous turn would expire them.
       const imageAtts = imageAttachments(message.attachments ?? [])
       const eagerImages = Promise.all(imageAtts.map(async (imageAtt) => {
-        if (imageAtt.url === undefined) return null
-        return downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+        if (imageAtt.url === undefined) {
+          console.error('[qqbot] image attachment has no URL')
+          return null
+        }
+        console.log(`[qqbot] eager download: ${imageAtt.url}`)
+        const result = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
+        if (result === null) {
+          console.error(`[qqbot] eager download returned null: ${imageAtt.url}`)
+        } else {
+          console.log(`[qqbot] eager download ok: ${result.data.length} bytes ${result.mediaType}`)
+        }
+        return result
       }))
       messageQueue = messageQueue
         .then(async () => {
