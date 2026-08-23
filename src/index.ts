@@ -365,8 +365,11 @@ export async function downloadImage(
 ): Promise<{ data: Uint8Array; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' } | null> {
   if (!isAllowedMediaUrl(url)) return null
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error' })
-    if (!response.ok || response.body === null) return null
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' })
+    if (!response.ok || response.body === null) {
+      console.error(`[qqbot] image download failed: ${response.status} ${url}`)
+      return null
+    }
     const declared = Number(response.headers.get('content-length'))
     if (Number.isFinite(declared) && declared > maxBytes) return null
     const chunks: Uint8Array[] = []
