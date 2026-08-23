@@ -7,6 +7,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { QQBot } from '@tencent-connect/qqbot-nodejs'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -234,6 +236,7 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     const imageAtt = firstImageAttachment(message.attachments ?? [])
     let imageInlined = false
     let imageDescription: string | undefined
+    let imagePath: string | undefined
     const content: ContentBlock[] = []
     if (imageAtt?.url !== undefined) {
       if (await imageSupport()) {
@@ -248,16 +251,18 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
           }
         }
       } else {
-        // Text-only model: describe the image through local Ollama so the agent
-        // still receives its content as readable text instead of a bare placeholder.
+        // Text-only model: describe the image through local Ollama and mirror it
+        // under the workspace so the agent reads this image, not a stale WeChat one.
         const image = await downloadImage(imageAtt.url, config.maxImageBytes, config.apiTimeoutMs)
         if (image !== null) {
           const description = await describeImageBytes(image.data)
           if (description !== null) imageDescription = description
+          const mirrorPath = mirrorImage(resolveWorkspacePath(ctx, targetWorkspaceId), image.data, image.mediaType, 'qqbot-inbox')
+          if (mirrorPath !== null) imagePath = mirrorPath
         }
       }
     }
-    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined, imageDescription) })
+    content.unshift({ type: 'text', text: formatInboundBody(message, imageInlined, imageDescription, imagePath) })
 
     currentTarget = message.replyTarget
     const followup = createUserMessage({
@@ -403,6 +408,56 @@ export async function describeImageBytes(data: Uint8Array): Promise<string | nul
     return text || null
   } catch (error) {
     console.error('[qqbot] vision describe failed:', error instanceof Error ? error.message : error)
+    return null
+  }
+}
+
+/**
+ * Resolve the bound workspace's filesystem path, falling back to the sandbox root.
+ * @param ctx - host context.
+ * @param workspaceId - settings-selected workspace id.
+ * @returns a writable workspace directory, or `undefined` when neither source resolves.
+ */
+function resolveWorkspacePath(ctx: Context, workspaceId: string): string | undefined {
+  const workspace = ctx.get('workspaceRegistry')?.get(WorkspaceId(workspaceId))
+  return workspace?.path ?? ctx.get('sandboxPolicy')?.workspaceRoot
+}
+
+/** File extension for one accepted image media type. */
+function imageExtension(mediaType: string): string {
+  const extensions: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+  }
+  return extensions[mediaType] ?? '.img'
+}
+
+/**
+ * Mirror one inbound image under `<workspace>/.dsh/attachments/<date>/` so the
+ * agent and the user can find it on disk. Non-fatal: a mirror failure leaves
+ * the description-only path intact.
+ * @param workspacePath - resolved workspace directory.
+ * @param bytes - encoded image bytes.
+ * @param mediaType - sniffed media type.
+ * @param prefix - filename prefix separating this bridge's images.
+ * @returns the written path, or `null` on failure.
+ */
+function mirrorImage(workspacePath: string | undefined, bytes: Uint8Array, mediaType: string, prefix: string): string | null {
+  if (workspacePath === undefined || bytes.length === 0) return null
+  try {
+    const now = new Date()
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    const dateDir = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    const stamp = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+    const dir = join(workspacePath, '.dsh', 'attachments', dateDir)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${stamp}-${prefix}-${Math.random().toString(36).slice(2, 8)}${imageExtension(mediaType)}`)
+    writeFileSync(file, bytes)
+    return file
+  } catch (error) {
+    console.error('[qqbot] mirror image failed:', error)
     return null
   }
 }

@@ -152,16 +152,21 @@ export function trustSender(sender: string, allowedSenders: readonly string[]): 
  * @param message - inbound payload.
  * @param imageInlined - true when the first image was persisted as an attachment block.
  * @param imageDescription - optional local-Ollama description of the first image when the model lacks vision.
+ * @param imagePath - optional on-disk mirror path for the first image.
  * @returns framed text the model sees.
  */
 export function formatInboundBody(
   message: QqInboundMessage,
   imageInlined: boolean,
   imageDescription?: string,
+  imagePath?: string,
 ): string {
   const sender = (message.senderId ?? 'unknown').replace(/[[\]\r\n]/g, '')
   const head = [`[${kindLabel(message.kind)} · ${sender}]`]
-  if (imageDescription !== undefined) head.push(`[图片：${sanitizeInbound(imageDescription)}]`)
+  if (imageDescription !== undefined) {
+    const label = `[图片：${sanitizeInbound(imageDescription)}]`
+    head.push(imagePath !== undefined ? `${label}（图片路径：${imagePath}）` : label)
+  }
   const text = buildInboundText(message)
   if (text) {
     head.push(sanitizeInbound(text))
