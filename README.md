@@ -19,7 +19,7 @@ The host plugin starts the WebSocket gateway when the resolved section carries a
 - **Inbound framing** — each follow-up is a `createUserMessage` with `source: { kind: 'plugin', plugin: 'qqbot-clawbot' }`. The model-visible text starts with `[QQ · <sender>]`; inbound copies of that prefix are rewritten so they cannot spoof it.
 - **Reply** — the driver listens to `session/event` for committed `assistant/message` text after that follow-up, then waits for `whenIdle()` and sends the last committed text back to QQ. Uncommitted chunks are not replies.
 - **Images** — HTTPS URLs on Tencent CDN hosts, capped by `maxImageBytes`, attach inline only when the default model declares image input.
-- **HITL** — `approval/request` for a daily QQ agent in an active C2C chat is answered in QQ (`允许` / `拒绝`); other chats fall through to the next answerer.
+- **HITL** — `approval/request` for a daily QQ agent in an active C2C chat is answered in QQ (`允许` / `拒绝`); other chats fall through to the next answerer. The prompt names the tool and its arguments so the approver can judge the call, but the argument rendering travels over QQ: values held by a credential-named key are withheld, credential-shaped substrings are withheld wherever they appear, the host home directory collapses to `~`, and the rendering is length-capped.
 
 The daily session id is `qqbot-YYYY-MM-DD` in the host local timezone.
 

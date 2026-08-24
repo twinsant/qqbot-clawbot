@@ -8,6 +8,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { QQBot } from '@tencent-connect/qqbot-nodejs'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -30,6 +31,7 @@ import {
   formatInboundBody,
   isAllowedMediaUrl,
   parseApprovalDecision,
+  redactToolArguments,
   sniffImageType,
   trustSender,
 } from './policy.ts'
@@ -45,6 +47,7 @@ export {
   dateKey,
   isAllowedMediaUrl,
   parseApprovalDecision,
+  redactToolArguments,
   sanitizeInbound,
   sniffImageType,
   trustSender,
@@ -332,7 +335,8 @@ function describeToolCall(req: ApprovalRequest): string {
       const event = events[index]
       if (event?.type === 'tool/call' && event.data.callId === req.callId) {
         const args = event.data.arguments
-        if (args && args !== '{}') lines.push(`参数: ${args.length > 600 ? `${args.slice(0, 600)}…` : args}`)
+        // The prompt travels over QQ: withhold credentials and the home path.
+        if (args && args !== '{}') lines.push(`参数: ${redactToolArguments(args, homedir())}`)
         break
       }
     }
@@ -434,7 +438,7 @@ export async function describeImageBytes(data: Uint8Array): Promise<string | nul
     })
     if (!response.ok) return null
     const payload = await response.json() as { response?: unknown }
-    const text = String(payload.response ?? '').trim()
+    const text = typeof payload.response === 'string' ? payload.response.trim() : ''
     return text || null
   } catch (error) {
     console.error('[qqbot] vision describe failed:', error instanceof Error ? error.message : error)

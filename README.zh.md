@@ -19,7 +19,7 @@ Web UI 的「设置 → QQ 机器人」把 AppID、AppSecret、工作区 id 和�
 - **入站成帧** — 每次跟进都是 `createUserMessage`，`source: { kind: 'plugin', plugin: 'qqbot-clawbot' }`。模型可见文本以 `[QQ · <sender>]` 开头；入站文本里的该前缀会被改写，无法冒充。
 - **回包** — 驱动在该次跟进之后监听 `session/event` 上已提交的 `assistant/message` 文本，等待 `whenIdle()`，再把最后一段已提交文本发回 QQ。未提交的 chunk 不是回包。
 - **图片** — 仅接受腾讯 CDN 主机上的 HTTPS URL，受 `maxImageBytes` 限制，并且只有默认模型声明图像输入时才会内联。
-- **HITL** — 当日 QQ agent 在进行中的 C2C 会话里收到的 `approval/request` 在 QQ 中回答（`允许` / `拒绝`）；其他会话交给下一个回答者。
+- **HITL** — 当日 QQ agent 在进行中的 C2C 会话里收到的 `approval/request` 在 QQ 中回答（`允许` / `拒绝`）；其他会话交给下一个回答者。提示会列出工具名和参数，供审批人判断调用；但参数文本要经 QQ 传输，所以凭证类字段名下的值会被隐去，凭证形状的子串无论出现在哪里都会被隐去，主机 home 目录折叠为 `~`，整体长度受限。
 
 按日会话 id 是主机本地时区的 `qqbot-YYYY-MM-DD`。
 

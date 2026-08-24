@@ -46,7 +46,7 @@ export function dailySessionId(now?: Date): string {
 export function isAllowedMediaUrl(url: string, hosts: readonly string[] = DEFAULT_IMAGE_HOSTS): boolean {
   try {
     const parsed = new URL(url)
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
+    if (parsed.protocol !== 'https:') return false
     return hosts.some(host => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))
   } catch {
     return false
@@ -91,6 +91,87 @@ export function parseApprovalDecision(text: string): Extract<ApprovalOutcome, 'a
  */
 export function sanitizeInbound(text: string): string {
   return text.replace(/\[QQ/g, '［QQ')
+}
+
+/** Stand-in for any value withheld from an approval prompt. */
+export const REDACTED = '[已隐去]'
+
+/** Longest rendered argument text one approval prompt carries. */
+export const MAX_ARGUMENT_CHARS = 600
+
+/** Longest single string value kept intact inside that rendering. */
+export const MAX_SCALAR_CHARS = 120
+
+/** Argument keys whose values never reach the QQ transport. */
+const SECRET_KEY_PATTERN
+  = /secret|token|password|passwd|credential|cookie|signature|session|api[_-]?key|access[_-]?key|private[_-]?key|auth/i
+
+/**
+ * Value shapes that carry a credential whatever key holds them. Applied to the
+ * rendered text so credentials pasted inside shell commands, URLs, or prose are
+ * caught alongside the ones sitting in a named field.
+ */
+const SECRET_VALUE_PATTERNS: readonly (readonly [RegExp, string])[] = [
+  [/-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----/g, REDACTED],
+  [/\b(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|xoxb|xoxp|xoxa)[-_][A-Za-z0-9_-]{16,}/g, REDACTED],
+  [/\bAKIA[0-9A-Z]{16}\b/g, REDACTED],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED],
+  [/\bbearer\s+[A-Z0-9._~+/-]{16,}={0,2}/gi, REDACTED],
+  [/([A-Z_][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL)[A-Z0-9_]*\s*=\s*)\S+/gi, `$1${REDACTED}`],
+  [/\b[0-9a-fA-F]{32,}\b/g, REDACTED],
+  [/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, REDACTED],
+]
+
+/**
+ * Withhold every credential-shaped substring from already-rendered text.
+ * @param text - rendered argument text.
+ * @returns the text with credential shapes replaced.
+ */
+function scrubSecretShapes(text: string): string {
+  return SECRET_VALUE_PATTERNS.reduce<string>(
+    (carry, [pattern, replacement]) => carry.replace(pattern, replacement),
+    text,
+  )
+}
+
+/**
+ * Rewrite one value tree, withholding secret-keyed fields and capping strings.
+ * @param value - parsed argument value.
+ * @param secretKey - whether the key holding this value names a credential.
+ * @returns the rewritten value.
+ */
+function redactValue(value: unknown, secretKey: boolean): unknown {
+  if (secretKey) return REDACTED
+  if (typeof value === 'string') {
+    return value.length > MAX_SCALAR_CHARS ? `${value.slice(0, MAX_SCALAR_CHARS)}…` : value
+  }
+  if (Array.isArray(value)) return value.map(item => redactValue(item, false))
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => [key, redactValue(item, SECRET_KEY_PATTERN.test(key))]))
+  }
+  return value
+}
+
+/**
+ * Render one tool call's arguments for a QQ approval prompt without disclosing
+ * credentials or the host's home directory. The prompt must say what is being
+ * approved, so field names and non-secret values survive; anything that names
+ * or looks like a credential is withheld, and the result is length-capped.
+ * @param json - raw `tool/call` argument JSON; unparseable text is scrubbed as-is.
+ * @param home - host home directory collapsed to `~`; empty disables collapsing.
+ * @returns prompt-safe argument text.
+ */
+export function redactToolArguments(json: string, home = ''): string {
+  let rendered: string
+  try {
+    rendered = JSON.stringify(redactValue(JSON.parse(json), false))
+  } catch {
+    rendered = json
+  }
+  const collapsed = home === '' ? rendered : rendered.split(home).join('~')
+  const scrubbed = scrubSecretShapes(collapsed)
+  return scrubbed.length > MAX_ARGUMENT_CHARS ? `${scrubbed.slice(0, MAX_ARGUMENT_CHARS)}…` : scrubbed
 }
 
 /**
