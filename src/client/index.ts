@@ -18,12 +18,12 @@ function bindSnapshotSelector<T>(source: {
   subscribe: (listener: () => void) => () => void
   getSnapshot: () => T
 }): SnapshotSelectorHook<T> {
+  // Capture stable closures so method-based sources keep their `this` binding
+  // (a detached `source.subscribe` would crash with `Cannot read ... 'store'`).
+  const subscribe = (listener: () => void): (() => void) => source.subscribe(listener)
+  const getSnapshot = (): T => source.getSnapshot()
   return function useSelector<S>(sel: (s: T) => S): S {
-    return useSyncExternalStore(
-      source.subscribe,
-      () => sel(source.getSnapshot()),
-      () => sel(source.getSnapshot()),
-    )
+    return useSyncExternalStore(subscribe, () => sel(getSnapshot()), () => sel(getSnapshot()))
   }
 }
 

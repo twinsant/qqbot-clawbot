@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /** QQ Bot settings section registration: slot declaration injection and locale-following label. */
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
