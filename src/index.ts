@@ -22,6 +22,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-title'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Config } from './schema.ts'
 import type { InboundImageNote, QqBotSettings, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
@@ -55,7 +56,7 @@ export {
 export { QQ_NS, QQ_SCHEMA } from './schema.ts'
 
 const SOURCE_PLUGIN = 'qqbot-clawbot'
-const MARKDOWN_SUPPORT = false
+const MARKDOWN_SUPPORT = true
 const API_BASE_URL = 'https://api.sgroup.qq.com'
 const TOKEN_BASE_URL = 'https://bots.qq.com'
 // Local Ollama vision fallback for text-only models (same as the WeChat bridge).
@@ -86,7 +87,8 @@ export function createOfficialGateway(appId: string, appSecret: string): QqGatew
  * @param createGateway - gateway factory; production uses the official SDK, tests pass a fake.
  */
 export function apply(ctx: Context, config: Config, createGateway = createOfficialGateway): void {
-  ctx.settings.register(QQ_NS, QQ_SCHEMA)
+  const qqScope = ctx.settings.register(QQ_NS, QQ_SCHEMA, { base: emptySettings() })
+  ctx.effect(() => qqScope.watch(() => applySettings()))
 
   let bound: { appId: string; appSecret: string } | undefined
   let targetWorkspaceId = ''
@@ -165,11 +167,11 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   }
 
   const persistAllowedSenders = (): void => {
-    void ctx.settings.update(QQ_NS, { allowedSenders: [...allowedSenders] }).catch(() => {})
+    void qqScope.update({ allowedSenders: [...allowedSenders] }).catch(() => {})
   }
 
-  const applySettings = (): void => {
-    const value = (ctx.settings.get(QQ_NS) as QqBotSettings | undefined) ?? emptySettings()
+  function applySettings(): void {
+    const value = (qqScope.get() as QqBotSettings | undefined) ?? emptySettings()
     const appId = value.appId.trim()
     const appSecret = value.appSecret.trim()
     targetWorkspaceId = value.workspaceId
@@ -316,9 +318,6 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     }
   }
 
-  ctx.on('settings/updated', (ns) => {
-    if (ns === QQ_NS) applySettings()
-  })
   applySettings()
   ctx.effect(() => stopBot, 'qqbot-clawbot.lifecycle')
 }
@@ -329,7 +328,7 @@ function emptySettings(): QqBotSettings {
 
 function describeToolCall(req: ApprovalRequest): string {
   const lines = [`工具: ${req.toolName}`]
-  const events = req.agent.session.events
+  const events = req.agent?.session?.snapshotEvents() ?? []
   if (req.callId !== undefined) {
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]

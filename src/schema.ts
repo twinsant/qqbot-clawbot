@@ -4,7 +4,6 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { QqBotSettings } from './types.ts'
 
 /** Deployment knobs for the QQ protocol driver. */
@@ -20,7 +19,7 @@ export interface Config {
 }
 
 /** Branded settings namespace registered by the host plugin. */
-export const QQ_NS = settingsNamespace('qqbot')
+export const QQ_NS = 'qqbot' as const
 
 /** User-document schema for the `qqbot` namespace. */
 export const QQ_SCHEMA: Schema<QqBotSettings> = Schema.object({
