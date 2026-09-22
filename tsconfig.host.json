@@ -20,6 +20,7 @@
     { "path": "../../llm/llm" },
     { "path": "../../settings/settings" },
     { "path": "../../interaction/user-approval" },
+    { "path": "../../interaction/user-questions" },
     { "path": "../../workspace/workspace" },
     { "path": "../../attachment/attachment" },
     { "path": "../../preset/agent-presets" },

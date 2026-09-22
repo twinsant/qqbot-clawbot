@@ -15,6 +15,7 @@ import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -98,6 +99,7 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   let messageQueue: Promise<void> = Promise.resolve()
   let currentTarget: QqReplyTarget | undefined
   let pendingApproval: { senderId: string; resolve: (outcome: ApprovalOutcome) => void } | undefined
+  let pendingQuestion: { senderId: string; question: AskUserQuestionItem; resolve: (answer: AskUserQuestionAnswerItem | null) => void } | undefined
   const dailyAgentIds = new Set<string>()
   const imageSupport = createImageSupportProbe(ctx)
 
@@ -133,6 +135,16 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
         const resolve = pendingApproval.resolve
         pendingApproval = undefined
         resolve(decision)
+        return
+      }
+      if (pendingQuestion !== undefined && pendingQuestion.senderId === sender) {
+        const { question, resolve } = pendingQuestion
+        const text = (message.content ?? '').trim()
+        const selected = parseQuestionReply(question, text)
+        pendingQuestion = undefined
+        resolve(selected === null
+          ? { id: question.id, selected: [], custom: text }
+          : { id: question.id, selected })
         return
       }
       // Eagerly download inbound images before the serialized agent turn: QQ image
@@ -223,6 +235,40 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     })
   }
 
+  /**
+   * Prompt QQ with one option-selection question and await the sender's reply.
+   * A caller-declared `signal` abort or the approval timeout settles as `null`,
+   * which the caller turns into `next()` so another answerer can take over.
+   */
+  const askQqQuestion = (question: AskUserQuestionItem, signal?: AbortSignal): Promise<AskUserQuestionAnswerItem | null> => {
+    const target = currentTarget
+    const live = bot
+    if (target === undefined || live === undefined) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => { finish(null) }, config.approvalTimeoutMs)
+      const finish = (answer: AskUserQuestionAnswerItem | null): void => {
+        if (settled) return
+        settled = true
+        if (pendingQuestion?.resolve === finish) pendingQuestion = undefined
+        signal?.removeEventListener('abort', onAbort)
+        clearTimeout(timer)
+        resolve(answer)
+      }
+      const onAbort = (): void => { finish(null) }
+      if (signal?.aborted === true) {
+        finish(null)
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      pendingQuestion = { senderId: target.targetId ?? '', question, resolve: finish }
+      void live.sendText(target, formatQuestion(question)).catch((error: unknown) => {
+        console.error('[qqbot] question send failed:', error)
+        finish(null)
+      })
+    })
+  }
+
   ctx.on('approval/request', async (req, next) => {
     if (!dailyAgentIds.has(String(req.agent.id))) return next()
     if (currentTarget?.scope !== 'c2c' || bot === undefined) return next()
@@ -231,6 +277,28 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       return outcome ?? await next()
     } catch (error) {
       console.error('[qqbot] approval answer failed:', error)
+      return next()
+    }
+  }, { prepend: true })
+
+  // Option-selection interactions (`ask_user_question`, plan review). Each
+  // question is prompted to QQ in turn, so a request carrying several questions
+  // — or several requests in a row — prompts for every one of them instead of
+  // leaving later questions to the no-answerer rejection.
+  ctx.on('user-questions/request', async (request, next) => {
+    const agent = request.agent
+    if (agent === undefined || !dailyAgentIds.has(String(agent.id))) return next()
+    if (currentTarget?.scope !== 'c2c' || bot === undefined) return next()
+    try {
+      const answers: AskUserQuestionAnswerItem[] = []
+      for (const question of request.questions) {
+        const answer = await askQqQuestion(question, request.signal)
+        if (answer === null) return next()
+        answers.push(answer)
+      }
+      return { answers }
+    } catch (error) {
+      console.error('[qqbot] question answer failed:', error)
       return next()
     }
   }, { prepend: true })
@@ -342,6 +410,54 @@ function describeToolCall(req: ApprovalRequest): string {
   }
   if (req.reason) lines.push(`原因: ${req.reason}`)
   return lines.join('\n')
+}
+
+/**
+ * Render one option-selection question as a QQ prompt: the question, its
+ * optional detail, and a numbered option list the sender can answer by index.
+ */
+function formatQuestion(question: AskUserQuestionItem): string {
+  const lines = [`❓ ${question.question}`]
+  if (question.detail) lines.push(question.detail)
+  const options = question.options ?? []
+  options.forEach((option, index) => {
+    lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ''}`)
+  })
+  if (question.multiSelect === true) {
+    lines.push('请回复选项序号或文字，可多选（用逗号分隔）')
+  } else if (options.length > 0) {
+    lines.push('请回复选项序号或文字')
+  } else {
+    lines.push('请直接回复你的答案')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Map one QQ reply onto a question's option labels.
+ * @param question - the question being answered.
+ * @param text - raw inbound reply text.
+ * @returns the selected labels, or `null` when nothing matched (caller falls back to a free-text answer).
+ */
+function parseQuestionReply(question: AskUserQuestionItem, text: string): string[] | null {
+  const options = question.options ?? []
+  if (options.length === 0) return null
+  const tokens = text.split(/[,，、;；\s]+/).map(token => token.trim()).filter(Boolean)
+  const selected: string[] = []
+  for (const token of tokens) {
+    if (/^\d+$/.test(token)) {
+      const index = Number(token) - 1
+      if (index >= 0 && index < options.length) {
+        selected.push(options[index]!.label)
+        continue
+      }
+    }
+    const match = options.find(option => option.label === token)
+      ?? options.find(option => option.label.includes(token) || token.includes(option.label))
+    if (match !== undefined) selected.push(match.label)
+  }
+  if (selected.length === 0) return null
+  return question.multiSelect === true ? selected : [selected[0]!]
 }
 
 function createImageSupportProbe(ctx: Context): () => Promise<boolean> {
