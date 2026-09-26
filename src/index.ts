@@ -56,7 +56,6 @@ export {
 } from './policy.ts'
 export { QQ_NS, QQ_SCHEMA } from './schema.ts'
 
-const SOURCE_PLUGIN = 'qqbot-clawbot'
 const MARKDOWN_SUPPORT = true
 const API_BASE_URL = 'https://api.sgroup.qq.com'
 const TOKEN_BASE_URL = 'https://bots.qq.com'
@@ -100,6 +99,10 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   let currentTarget: QqReplyTarget | undefined
   let pendingApproval: { senderId: string; resolve: (outcome: ApprovalOutcome) => void } | undefined
   let pendingQuestion: { senderId: string; question: AskUserQuestionItem; resolve: (answer: AskUserQuestionAnswerItem | null) => void } | undefined
+  /** Senders already told their account is not allow-listed; one notice per run. */
+  const notifiedUntrusted = new Set<string>()
+  /** Conversations already told that group chat is unsupported; one notice per run. */
+  const notifiedUnrouted = new Set<string>()
   const dailyAgentIds = new Set<string>()
   const imageSupport = createImageSupportProbe(ctx)
 
@@ -315,12 +318,33 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     if (live === undefined) return
     if (message.kind !== 'c2c' && !config.allowNonC2c) {
       console.error('[qqbot] dropping non-c2c message (set allowNonC2c: true to allow)')
+      const label = (message.senderId ?? 'unknown').replace(/[[\]\r\n]/g, '')
+      // Say it once per conversation rather than dropping in silence, so a
+      // group reader learns why the bot ignored them.
+      const key = `non-c2c:${message.replyTarget.targetId ?? label}`
+      if (!notifiedUnrouted.has(key)) {
+        notifiedUnrouted.add(key)
+        void live.sendText(message.replyTarget, '（QQ 助手）群聊暂未开通，请私聊我。').catch(() => {})
+      }
       return
     }
     const sender = message.senderId ?? 'unknown'
     const trust = trustSender(sender, allowedSenders)
     if (!trust.trusted) {
-      console.error('[qqbot] dropping message from untrusted sender', sender.replace(/[[\]\r\n]/g, ''))
+      const label = sender.replace(/[[\]\r\n]/g, '')
+      console.error('[qqbot] dropping message from untrusted sender', label)
+      // Tell the sender once per run instead of dropping in silence: the id in
+      // the notice is what an owner messaging from a second account needs to
+      // have added to the allowlist.
+      if (message.kind === 'c2c' && !notifiedUntrusted.has(sender)) {
+        notifiedUntrusted.add(sender)
+        void live.sendText(
+          message.replyTarget,
+          `（QQ 助手）你的账号不在允许名单里，这条消息没有转给助手。\n你的 QQ 号：${label}\n要开通请把这个号加进白名单。`,
+        ).catch((error: unknown) => {
+          console.error('[qqbot] untrusted notice failed:', error)
+        })
+      }
       return
     }
     if (trust.firstTrust !== undefined) {
@@ -367,7 +391,11 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
     currentTarget = message.replyTarget
     const followup = createUserMessage({
       content,
-      source: { kind: 'plugin', plugin: SOURCE_PLUGIN },
+      // A human typed this in QQ, so it enters as a user message: the session
+      // view renders `source.kind === 'user'` as a user turn, while a plugin
+      // source collapses the same row into an injected-context row the reader
+      // has to expand. The channel and sender stay visible in the body prefix.
+      source: { kind: 'user' },
     })
     try {
       const agent = await ensureDailyAgent(ctx, targetWorkspaceId, dailyAgentIds)
