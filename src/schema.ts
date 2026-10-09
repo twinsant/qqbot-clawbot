@@ -7,7 +7,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { QqBotSettings } from './types.ts'
 
 /** Deployment knobs for the QQ protocol driver. */
-export interface Config {
+export interface Config extends QqBotSettings {
   /** Accept group, guild, and DM messages. C2C-only is the default because TOFU trusts the first sender. */
   allowNonC2c: boolean
   /** Hard cap on a downloaded inbound image, in bytes. */
@@ -19,15 +19,17 @@ export interface Config {
 }
 
 /** Branded settings namespace registered by the host plugin. */
-export const QQ_NS = 'qqbot' as const
+export const QQ_NS = 'qqbot-clawbot' as const
 
-/** User-document schema for the `qqbot` namespace. */
-export const QQ_SCHEMA: Schema<QqBotSettings> = Schema.object({
+const QQ_FIELDS = {
   appId: Schema.string().default(''),
   appSecret: Schema.string().role('secret').default(''),
   workspaceId: Schema.string().default(''),
   allowedSenders: Schema.array(Schema.string()).default([]),
-})
+}
+
+/** Binding fields projected into the `qqbot-clawbot` configuration form. */
+export const QQ_SCHEMA: Schema<QqBotSettings> = Schema.object(QQ_FIELDS)
 
 /** Default image-download timeout. */
 export const DEFAULT_API_TIMEOUT_MS = 15_000
@@ -38,6 +40,7 @@ export const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
 
 /** Deployment schema for the host plugin. */
 export const Config: Schema<Config> = Schema.object({
+  ...QQ_FIELDS,
   allowNonC2c: Schema.boolean().default(false),
   maxImageBytes: Schema.number().min(1).default(DEFAULT_MAX_IMAGE_BYTES),
   apiTimeoutMs: Schema.number().min(1).default(DEFAULT_API_TIMEOUT_MS),

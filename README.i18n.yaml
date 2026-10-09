@@ -1,6 +1,49 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/qqbot/qqbot-clawbot/README.md
-README.md: 23d3e110abf7e5889332e5bd1847a9d1717dddbf
-README.zh.md: dd8ab884bd6a287297c66fc8b8d9724788483ad0
+/:
+  en: f7d9dfc2f35ba260
+  zh: 19da9ca8cd79dc19
+/deepseek-ai-dsh-qqbot-clawbot:
+  en: b879ea5b52dba03c
+  zh: e1466b791de8c0ea
+/deepseek-ai-dsh-qqbot-clawbot/summary:
+  en: a9251df9bfb524b8
+  zh: 6c91fbc845ab2bfe
+/deepseek-ai-dsh-qqbot-clawbot/table-of-contents:
+  en: ae7761efe9c49d1c
+  zh: 2f9e4b4ae334b5d9
+/deepseek-ai-dsh-qqbot-clawbot/binding:
+  en: fe37008ca4410924
+  zh: 7d3f1519aba7aacf
+/deepseek-ai-dsh-qqbot-clawbot/inbound-contract:
+  en: 77a8862bc87191d0
+  zh: 0268080f219d036b
+/deepseek-ai-dsh-qqbot-clawbot/configuration:
+  en: ee716956a96d2045
+  zh: 2990484ad915fc98
+/deepseek-ai-dsh-qqbot-clawbot/install:
+  en: f2937bfcaa521010
+  zh: c81a71dc20c67c08
+/deepseek-ai-dsh-qqbot-clawbot/model-experience:
+  en: 215e7ba838619b7b
+  zh: 215e7ba838619b7b
+/deepseek-ai-dsh-qqbot-clawbot/model-experience/inbound-follow-up:
+  en: 0fffde7093a22d3b
+  zh: 5b19321f349ce5a0
+/deepseek-ai-dsh-qqbot-clawbot/model-experience/inbound-follow-up/what-the-model-sees:
+  en: bab5b76a1710bc97
+  zh: f0e2ff61331cacef
+/deepseek-ai-dsh-qqbot-clawbot/model-experience/inbound-follow-up/token-effect:
+  en: edf82c8e1debf216
+  zh: 4715e4f973a7f381
+/deepseek-ai-dsh-qqbot-clawbot/model-experience/inbound-follow-up/kv-cache-effect:
+  en: 21d83483f7798638
+  zh: 85963eb4cba18cad
+/deepseek-ai-dsh-qqbot-clawbot/known-limitations-and-deferred-work:
+  en: 80c6e85cbd56c996
+  zh: 4ee2bc449641963e
+/deepseek-ai-dsh-qqbot-clawbot/known-limitations-and-deferred-work/dev-note:
+  en: 0a1253c6f7b5e8b9
+  zh: 9f56528562c7c914

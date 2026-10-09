@@ -18,8 +18,8 @@ async function bench() {
   ctx.provide('locale', locale)
   new TestRemote(ctx)
   ctx.provide('connection', { api: {}, isLoopback: true } as never)
-  ctx.provide('settingsScope', {
-    bind: () => ({
+  ctx.provide('configForms', {
+    get: () => ({
       getSnapshot: () => ({
         status: 'ready',
         value: { appId: '', appSecret: '', workspaceId: '', allowedSenders: [] },
@@ -48,7 +48,7 @@ function declare(slots: SlotRegistry): () => void {
 
 describe('qqbot-clawbot client apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'settingsScope'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'configForms'])
   })
 
   it('registers the QQ Bot nav entry once settings.section is declared', async () => {

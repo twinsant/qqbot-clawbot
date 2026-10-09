@@ -23,10 +23,9 @@
     { "path": "../../interaction/user-questions" },
     { "path": "../../workspace/workspace" },
     { "path": "../../attachment/attachment" },
-    { "path": "../../preset/agent-presets" },
+    { "path": "../../preset/agent-preset-registry" },
     { "path": "../../sandbox/sandbox-policy" },
     { "path": "../../session/session-persistence" },
-    { "path": "../../session/session-title" },
-    { "path": "../../runtime-diagnostics/invariants" }
+    { "path": "../../session/session-title" }
   ]
 }

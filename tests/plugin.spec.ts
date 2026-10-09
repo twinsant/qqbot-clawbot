@@ -1,41 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { QqGateway, QqInboundMessage } from '../src/types.ts'
-import { apply, inject, name } from '../src/index.ts'
+import { apply, inject, name, Config } from '../src/index.ts'
 import { QQ_NS } from '../src/schema.ts'
 import { dailySessionId } from '../src/policy.ts'
 import { collectAssistantReply } from '../src/reply.ts'
-import * as QqInvariant from '../src/invariant.ts'
-import InvariantRegistry from '@deepseek-ai/dsh-invariants'
-import SessionStore from '@deepseek-ai/dsh-session'
-
-class MemorySettings extends SettingsProvider {
-  doc: Record<string, unknown>
-
-  constructor(ctx: ConstructorParameters<typeof SettingsProvider>[0], options?: { doc?: Record<string, unknown> }) {
-    super(ctx)
-    this.doc = structuredClone(options?.doc ?? {})
-  }
-
-  get writable(): boolean {
-    return true
-  }
-
-  protected load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(structuredClone(this.doc))
-  }
-
-  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.doc[ns] = structuredClone(section)
-    return Promise.resolve()
-  }
-}
 
 interface FakeGateway extends QqGateway {
   handlers: Map<string, (...args: readonly unknown[]) => void>
@@ -65,7 +40,11 @@ function fakeAgent(id = dailySessionId()): Agent {
     id: SessionId(id),
     options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: {
+      nextTurn: [], nextStep: [],
+      clear() {}, append() {}, prepend() {},
+      replace: () => false, remove: () => false, splice: () => [],
+    },
     status: 'idle',
     ctx: scope,
     followup: () => {},
@@ -99,9 +78,26 @@ describe('qqbot-clawbot plugin', () => {
     const root = new Context()
     ctx = root
     await root.plugin(AgentRegistry)
-    await root.plugin(MemorySettings, { doc })
+    await root.plugin(Loader)
+    root.provide('settings', {
+      configure: () => () => {},
+      update: async (_ns: string, patch: object) => {
+        const entry = root.loader.resolve(QQ_NS)
+        await entry.update({ config: { ...entry.options.config as object, ...patch } })
+        await entry.fiber!.await()
+      },
+    } as never)
     gateway = createFakeGateway()
-    apply(root, config, () => gateway!)
+    root.loader.builtins.qqbot = {
+      name, inject, Config,
+      apply: (pluginCtx: Context, pluginConfig: Config) => apply(pluginCtx, pluginConfig, () => {
+        gateway = createFakeGateway()
+        return gateway
+      }),
+    }
+    const entryOptions = { id: QQ_NS, name: 'cordis:qqbot', config: { ...config, ...doc.qqbot as object } }
+    await root.loader.create(entryOptions)
+    await root.loader.resolve(QQ_NS).fiber!.await()
     return root
   }
 
@@ -150,11 +146,11 @@ describe('qqbot-clawbot plugin', () => {
     const message = followups[0] as {
       id: string
       role: string
-      source: { kind: string; plugin: string }
+      source: { kind: string }
       content: Array<{ type: string; text?: string }>
     }
     expect(message.role).toBe('user')
-    expect(message.source).toEqual({ kind: 'plugin', plugin: 'qqbot-clawbot' })
+    expect(message.source).toEqual({ kind: 'user' })
     expect(message.content[0]?.text).toContain('ping')
     expect(message.id).toBeDefined()
   })
@@ -217,7 +213,7 @@ describe('qqbot-clawbot plugin', () => {
     const agent = fakeAgent()
     const inbound = createUserMessage({
       content: [{ type: 'text', text: 'hi' }],
-      source: { kind: 'plugin', plugin: 'qqbot-clawbot' },
+      source: { kind: 'user' },
     })
     const collector = collectAssistantReply(agent, inbound.id)
     agent.ctx.emit('session/event', agent.session, {
@@ -233,14 +229,6 @@ describe('qqbot-clawbot plugin', () => {
       data: { message: { id: 'a', role: 'assistant', content: [{ type: 'text', text: 'pong' }] } },
     } as never)
     await expect(collector.done()).resolves.toBe('pong')
-  })
-
-  it('registers an empty invariant companion', async () => {
-    const root = new Context()
-    ctx = root
-    await root.plugin(SessionStore)
-    await root.plugin(InvariantRegistry, { enabled: true })
-    await expect(root.plugin(QqInvariant).then(() => undefined)).resolves.toBeUndefined()
   })
 
   it('unregisters the gateway when the plugin fiber disposes', async () => {

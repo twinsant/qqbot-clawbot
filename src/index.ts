@@ -19,14 +19,14 @@ import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Config } from './schema.ts'
-import type { InboundImageNote, QqBotSettings, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
+import type { InboundImageNote, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
 import {
   dailySessionId,
   imageAttachments,
@@ -38,7 +38,7 @@ import {
   trustSender,
 } from './policy.ts'
 import { collectAssistantReply } from './reply.ts'
-import { QQ_NS, QQ_SCHEMA } from './schema.ts'
+import { QQ_NS } from './schema.ts'
 
 export const name = 'qqbot-clawbot'
 export const inject = ['agents', 'settings']
@@ -87,8 +87,7 @@ export function createOfficialGateway(appId: string, appSecret: string): QqGatew
  * @param createGateway - gateway factory; production uses the official SDK, tests pass a fake.
  */
 export function apply(ctx: Context, config: Config, createGateway = createOfficialGateway): void {
-  const qqScope = ctx.settings.register(QQ_NS, QQ_SCHEMA, { base: emptySettings() })
-  ctx.effect(() => qqScope.watch(() => applySettings()))
+  ctx.effect(() => ctx.settings.configure({ auto: false }), 'qqbot-clawbot.settings')
 
   let bound: { appId: string; appSecret: string } | undefined
   let targetWorkspaceId = ''
@@ -98,7 +97,11 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   let messageQueue: Promise<void> = Promise.resolve()
   let currentTarget: QqReplyTarget | undefined
   let pendingApproval: { senderId: string; resolve: (outcome: ApprovalOutcome) => void } | undefined
-  let pendingQuestion: { senderId: string; question: AskUserQuestionItem; resolve: (answer: AskUserQuestionAnswerItem | null) => void } | undefined
+  let pendingQuestion: {
+    senderId: string
+    question: AskUserQuestionItem
+    resolve: (answer: AskUserQuestionAnswerItem | null) => void
+  } | undefined
   /** Senders already told their account is not allow-listed; one notice per run. */
   const notifiedUntrusted = new Set<string>()
   /** Conversations already told that group chat is unsupported; one notice per run. */
@@ -182,11 +185,11 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   }
 
   const persistAllowedSenders = (): void => {
-    void qqScope.update({ allowedSenders: [...allowedSenders] }).catch(() => {})
+    void ctx.settings.update(QQ_NS, { allowedSenders: [...allowedSenders] }).catch(() => {})
   }
 
   function applySettings(): void {
-    const value = (qqScope.get() as QqBotSettings | undefined) ?? emptySettings()
+    const value = config
     const appId = value.appId.trim()
     const appSecret = value.appSecret.trim()
     targetWorkspaceId = value.workspaceId
@@ -418,10 +421,6 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   ctx.effect(() => stopBot, 'qqbot-clawbot.lifecycle')
 }
 
-function emptySettings(): QqBotSettings {
-  return { appId: '', appSecret: '', workspaceId: '', allowedSenders: [] }
-}
-
 function describeToolCall(req: ApprovalRequest): string {
   const lines = [`工具: ${req.toolName}`]
   const events = req.agent?.session?.snapshotEvents() ?? []
@@ -475,8 +474,9 @@ function parseQuestionReply(question: AskUserQuestionItem, text: string): string
   for (const token of tokens) {
     if (/^\d+$/.test(token)) {
       const index = Number(token) - 1
-      if (index >= 0 && index < options.length) {
-        selected.push(options[index]!.label)
+      const option = options[index]
+      if (option !== undefined) {
+        selected.push(option.label)
         continue
       }
     }
@@ -485,7 +485,7 @@ function parseQuestionReply(question: AskUserQuestionItem, text: string): string
     if (match !== undefined) selected.push(match.label)
   }
   if (selected.length === 0) return null
-  return question.multiSelect === true ? selected : [selected[0]!]
+  return question.multiSelect === true ? selected : selected.slice(0, 1)
 }
 
 function createImageSupportProbe(ctx: Context): () => Promise<boolean> {
@@ -687,7 +687,7 @@ export async function ensureDailyAgent(
   if (persistence !== undefined) {
     try {
       const headers = await persistence.list()
-      if (headers.some(header => header.id === sessionId)) {
+      if (headers.some(snapshot => snapshot.header.id === sessionId)) {
         const handle = await ctx.agents.resume({
           resumeSessionId: sessionId,
           ...agentOptions === undefined ? {} : { agentOptions },

@@ -45,7 +45,7 @@ const NS = 'settings.qqbot'
  * Required services. The target slot is declared by ui-settings; registration
  * waits on that declaration through `slots.inject()`.
  */
-export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsScope']
+export const inject = ['slots', 'locale', 'connection', 'remote', 'configForms']
 
 /**
  * Register the QQ Bot settings section once `settings.section` is declared.
@@ -54,7 +54,7 @@ export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsScope
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'qqbot-clawbot: copy dictionaries')
 
-  const host = ctx.settingsScope.bind<QqBotSettings>({ namespace: 'qqbot' })
+  const host = ctx.configForms.get<QqBotSettings>('qqbot-clawbot')
   const useSnapshot = bindSnapshotSelector(host)
   const t = ctx.locale.bind(NS)
   const injected = (): QqBotSectionInjected => ({ host, useSnapshot, t })

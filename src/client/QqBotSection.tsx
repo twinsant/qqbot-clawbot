@@ -7,7 +7,7 @@
 import { useState } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { QqBotSettings } from '../types.ts'
 import css from './QqBotSection.module.css'
@@ -22,9 +22,9 @@ export interface QqBotDraft {
 /** Injected dependencies of {@link QqBotSection}. */
 export interface QqBotSectionInjected {
   /** Bound `qqbot` settings scope. */
-  host: SettingsScope<QqBotSettings>
+  host: ConfigForm<QqBotSettings>
   /** uSES hook over the scope snapshot. */
-  useSnapshot: SnapshotSelectorHook<SettingsScopeSnapshot<QqBotSettings>>
+  useSnapshot: SnapshotSelectorHook<ConfigFormSnapshot<QqBotSettings>>
   /** Section copy, bound to `settings.qqbot`. */
   t: TranslateNS<'settings.qqbot'>
 }
