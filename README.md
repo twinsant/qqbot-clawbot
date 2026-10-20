@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Chat with the agent from QQ. One robot bound through the `qqbot-clawbot` Loader entry forwards inbound C2C messages into a per-day session of a chosen workspace and sends the agent's replies back. Approvals and agent questions are answered in QQ. Binding, workspace, and the sender allowlist live in the profile configuration, and Loader reloads the plugin when they change. The package registers no model-facing tools.
+Chat with the agent from QQ. One robot bound through the `qqbot-clawbot` Loader entry forwards inbound C2C messages into a per-day session of a chosen workspace and sends the agent's replies back. Approvals and agent questions are answered in QQ. Binding, workspace, and the sender allowlist live in the profile configuration, and Loader reloads the plugin when they change. It also registers two model-facing tools, `qq_send_image` and `qq_send_file`, so a reply can carry an attachment instead of a path.
 
 ## Table of Contents
 
@@ -83,11 +83,35 @@ Prompt tokens are data-dependent and remain in that day's session history until 
 
 Append-only. Each inbound follow-up is a new user message after the reusable request prefix.
 
+### Outbound media
+
+#### What the model can send
+
+Two model-facing tools answer with an attachment instead of a path:
+
+| Tool | Payload | Limit |
+|---|---|---|
+| `qq_send_image` | `.png` / `.jpg` / `.jpeg` / `.gif` / `.webp`, optional caption | 30 MB |
+| `qq_send_file` | any regular file, optional display name and caption | 100 MB (chunked upload above 5 MB) |
+
+The destination is the conversation that started the turn. A QQ session is one per day for every peer, so the chat is taken from the inbound message, never from the model's arguments. Outside a QQ turn — the web UI, say — the send falls back to the first allowlisted C2C sender, the same default the standalone send script uses.
+
+Only files inside the QQ session workspace are accepted, and symlinks are resolved before that check: a chat-driven agent may upload what it produced, not anything the host can read.
+
+#### Token effect
+
+One small round trip per send: the result is a single line such as `sent shot.png (12.3KB) to QQ C2C`. The uploaded bytes never enter the model request.
+
+#### KV Cache effect
+
+Append-only, exactly like the text reply it accompanies.
+
 ## Known Limitations and Deferred Work
 
 - **One robot, one daily session** — a single gateway and one `qqbot-YYYY-MM-DD` session per process; concurrent C2C chats share that session.
 - **Secret slots are write-only on the wire** — the settings page treats a stored AppID as bound and never echoes AppSecret.
 - **Group admission is off by default** — TOFU is unsafe when the first speaker is not the owner.
+- **File messages need platform permission** — `qq_send_file` uploads through the official rich-media API, so the robot must have file-message permission on q.qq.com; otherwise the platform rejects the send and the tool reports it.
 
 <a id="dev-note"></a>
 ### Dev Note

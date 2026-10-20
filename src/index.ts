@@ -2,7 +2,9 @@
  * QQ Open Platform protocol driver. Binds one robot from the `qqbot` settings
  * namespace and forwards inbound C2C messages into a per-day harness session.
  * Binding, workspace choice, and allowlist edits belong to the settings
- * document; this package does not register model-facing tools.
+ * document. It also registers two model-facing tools, `qq_send_image` and
+ * `qq_send_file`, so a QQ turn can answer with an attachment instead of a path:
+ * QQ renders markdown image syntax as literal text.
  * @module @deepseek-ai/dsh-qqbot-clawbot
  */
 
@@ -16,6 +18,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -27,6 +31,12 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { Config } from './schema.ts'
 import type { InboundImageNote, QqGateway, QqInboundMessage, QqReplyTarget } from './types.ts'
+import {
+  describeMediaError,
+  formatBytes,
+  resolveSendableMedia,
+  type MediaKind,
+} from './media.ts'
 import {
   dailySessionId,
   imageAttachments,
@@ -55,6 +65,15 @@ export {
   trustSender,
 } from './policy.ts'
 export { QQ_NS, QQ_SCHEMA } from './schema.ts'
+export {
+  IMAGE_EXTENSIONS,
+  MEDIA_LIMITS,
+  MediaRefusal,
+  formatBytes,
+  resolveSendableMedia,
+} from './media.ts'
+export type { MediaKind, SendableMedia } from './media.ts'
+export type { QqMediaSource } from './types.ts'
 
 const MARKDOWN_SUPPORT = true
 const API_BASE_URL = 'https://api.sgroup.qq.com'
@@ -96,6 +115,12 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   let botAbort: AbortController | undefined
   let messageQueue: Promise<void> = Promise.resolve()
   let currentTarget: QqReplyTarget | undefined
+  /**
+   * Reply destination of the turn each live session is serving, keyed by session
+   * id. The per-day QQ session is shared by every peer, so this map — not the
+   * model's arguments — decides which chat a media tool answers.
+   */
+  const replyTargets = new Map<string, QqReplyTarget>()
   let pendingApproval: { senderId: string; resolve: (outcome: ApprovalOutcome) => void } | undefined
   let pendingQuestion: {
     senderId: string
@@ -189,16 +214,18 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
   }
 
   function applySettings(): void {
-    const value = config
-    const appId = value.appId.trim()
-    const appSecret = value.appSecret.trim()
-    targetWorkspaceId = value.workspaceId
-    if (Array.isArray(value.allowedSenders)) {
-      allowedSenders = value.allowedSenders.filter((item: string) => item.length > 0 && item !== 'unknown')
+    // The binding fields are volatile: each is a stable reference in `config`,
+    // so a fresh snapshot is read here rather than captured once.
+    const appId = config.appId.get().trim()
+    const appSecret = config.appSecret.get().trim()
+    targetWorkspaceId = config.workspaceId.get()
+    const senders = config.allowedSenders.get()
+    if (Array.isArray(senders)) {
+      allowedSenders = senders.filter((item: string) => item.length > 0 && item !== 'unknown')
     }
     const current = bound
     if (appId && appSecret) {
-      if (current?.appId !== appId || current.appSecret !== appSecret) {
+      if (current === undefined || current.appId !== appId || current.appSecret !== appSecret) {
         bound = { appId, appSecret }
         startBot(appId, appSecret)
         console.log('[qqbot] bound', appId)
@@ -400,8 +427,11 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       // has to expand. The channel and sender stay visible in the body prefix.
       source: { kind: 'user' },
     })
+    let replySessionKey: string | undefined
     try {
       const agent = await ensureDailyAgent(ctx, targetWorkspaceId, dailyAgentIds)
+      replySessionKey = String(agent.session.id)
+      replyTargets.set(replySessionKey, message.replyTarget)
       const collector = collectAssistantReply(agent, followup.id)
       agent.followup(followup)
       const replyText = await collector.done()
@@ -414,11 +444,170 @@ export function apply(ctx: Context, config: Config, createGateway = createOffici
       }
     } finally {
       currentTarget = undefined
+      if (replySessionKey !== undefined) replyTargets.delete(replySessionKey)
     }
   }
 
+  registerMediaTools(ctx, {
+    gateway: () => bot,
+    workspaceRoot: () => resolveWorkspacePath(ctx, targetWorkspaceId),
+    targets: replyTargets,
+    defaultTarget: () => {
+      const first = allowedSenders[0]
+      return first === undefined ? undefined : { scope: 'c2c', targetId: first }
+    },
+  })
+
   applySettings()
+  // Volatile fields update in place instead of remounting the plugin, so the
+  // config document moving is the notification that the binding changed.
+  ctx.effect(
+    () => ctx.on('loader/volatile-update', () => { applySettings() }),
+    'qqbot-clawbot.volatile-settings',
+  )
   ctx.effect(() => stopBot, 'qqbot-clawbot.lifecycle')
+}
+
+/** Deadline for one media upload; a large file may go through the chunked path. */
+const MEDIA_TOOL_TIMEOUT_MS = 120_000
+
+/** Model-facing text result shared by both media tools. */
+const TEXT_OUTPUT = {
+  schema: { type: 'string' as const },
+  render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
+}
+
+/** Live plugin state a media tool call needs. */
+interface MediaToolDeps {
+  /** Gateway bound from the settings document, absent while unbound. */
+  readonly gateway: () => QqGateway | undefined
+  /** Workspace the QQ session runs in; files must live inside it. */
+  readonly workspaceRoot: () => string | undefined
+  /** Reply destination of the turn each session is currently serving. */
+  readonly targets: ReadonlyMap<string, QqReplyTarget>
+  /**
+   * Fallback destination when no QQ turn is in flight — the first allowlisted
+   * C2C sender, the same default the standalone send script uses.
+   */
+  readonly defaultTarget: () => QqReplyTarget | undefined
+}
+
+/**
+ * Register the two model-facing media tools.
+ *
+ * Registration is optional on purpose: a composition without a tool registry
+ * keeps the text bridge working, so the tools mount only when `tools` arrives.
+ * @param ctx - plugin context.
+ * @param deps - live plugin state read at call time.
+ */
+function registerMediaTools(ctx: Context, deps: MediaToolDeps): void {
+  ctx.inject(['tools'], (child) => {
+    child.effect(() => child.tools.register(defineTool({
+      name: 'qq_send_image',
+      description:
+        'Send a local image file to the QQ conversation you are replying to. '
+        + 'Inside a QQ turn it answers that chat; otherwise it goes to the first allowlisted C2C sender. '
+        + 'Only files inside the QQ session workspace may be sent. '
+        + 'Use this instead of writing markdown image syntax: QQ shows that as literal text.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'Image path, absolute or relative to the workspace root.',
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional text sent together with the image.',
+        },
+      },
+      output: TEXT_OUTPUT,
+      timeoutMs: MEDIA_TOOL_TIMEOUT_MS,
+      execute: (args, exec) => sendMedia('image', args, exec, deps),
+    })), 'qqbot-clawbot.tool.qq_send_image')
+
+    child.effect(() => child.tools.register(defineTool({
+      name: 'qq_send_file',
+      description:
+        'Send a local file to the QQ conversation you are replying to. '
+        + 'Inside a QQ turn it answers that chat; otherwise it goes to the first allowlisted C2C sender. '
+        + 'Only files inside the QQ session workspace may be sent. '
+        + 'The robot needs file-message permission on the QQ Open Platform; '
+        + 'if the platform refuses, report that instead of retrying.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'File path, absolute or relative to the workspace root.',
+        },
+        name: {
+          type: 'string',
+          description: 'Display name for the file; defaults to its basename.',
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional text sent together with the file.',
+        },
+      },
+      output: TEXT_OUTPUT,
+      timeoutMs: MEDIA_TOOL_TIMEOUT_MS,
+      execute: (args, exec) => sendMedia('file', args, exec, deps),
+    })), 'qqbot-clawbot.tool.qq_send_file')
+  })
+}
+
+/**
+ * Deliver one file to the conversation that triggered the running turn.
+ *
+ * The destination comes from the turn, not from the model: a QQ session is one
+ * per day for every peer, so the agent cannot be trusted to name the chat, and
+ * the target is only present while that peer's turn is in flight.
+ * @param kind - which tool asked.
+ * @param args - validated tool arguments.
+ * @param exec - execution context carrying the calling agent.
+ * @param deps - live plugin state.
+ * @returns a one-line confirmation for the model.
+ */
+async function sendMedia(
+  kind: MediaKind,
+  args: { path: string; caption?: string; name?: string },
+  exec: ToolRunContext,
+  deps: MediaToolDeps,
+): Promise<string> {
+  const gateway = deps.gateway()
+  if (gateway === undefined) throw new Error('QQ 机器人当前未连接，无法发送。')
+
+  const sessionId = exec.agent?.session?.id
+  const turnTarget = sessionId === undefined ? undefined : deps.targets.get(String(sessionId))
+  const target = turnTarget ?? deps.defaultTarget()
+  if (target === undefined) {
+    throw new Error('没有可发送的目标：还没有已授权会话。先在 QQ 里给机器人发条消息完成授权。')
+  }
+  const viaFallback = turnTarget === undefined
+
+  const media = resolveSendableMedia(deps.workspaceRoot(), args.path, kind)
+  const caption = args.caption?.trim() ?? ''
+  const scopeLabel = target.scope === 'group' ? '群聊' : '私聊'
+
+  try {
+    if (kind === 'image') {
+      await gateway.sendImage(
+        target,
+        { localPath: media.path },
+        caption === '' ? undefined : { content: caption },
+      )
+    } else {
+      const requested = args.name?.trim() ?? ''
+      await gateway.sendFile(target, { localPath: media.path }, {
+        fileName: requested === '' ? media.name : requested,
+        ...caption === '' ? {} : { content: caption },
+      })
+    }
+  } catch (error) {
+    throw new Error(`发送失败：${describeMediaError(error)}`)
+  }
+
+  const fallbackNote = viaFallback ? '（这一轮不是从 QQ 发起的，发给了第一个已授权私聊）' : ''
+  return `已发送 ${media.name}（${formatBytes(media.size)}）到 QQ ${scopeLabel}${fallbackNote}。`
 }
 
 function describeToolCall(req: ApprovalRequest): string {

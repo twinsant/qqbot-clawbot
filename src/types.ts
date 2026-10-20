@@ -37,6 +37,12 @@ export interface QqInboundMessage {
   readonly replyTarget: QqReplyTarget
 }
 
+/** One local file handed to a media send. */
+export interface QqMediaSource {
+  /** Absolute path on disk; the SDK reads it and uploads the bytes. */
+  readonly localPath: string
+}
+
 /** Narrow gateway the host plugin drives; the official SDK is adapted to this. */
 export interface QqGateway {
   /**
@@ -58,6 +64,24 @@ export interface QqGateway {
    * @param text - already-rendered assistant text.
    */
   sendText(target: QqReplyTarget, text: string): Promise<void>
+  /**
+   * Upload one local image and send it inline.
+   * @param target - inbound reply destination.
+   * @param source - local image file.
+   * @param opts - optional caption sent with the image.
+   */
+  sendImage(target: QqReplyTarget, source: QqMediaSource, opts?: { content?: string }): Promise<unknown>
+  /**
+   * Upload one local file and send it as a file message.
+   * @param target - inbound reply destination.
+   * @param source - local file.
+   * @param opts - display name and optional caption.
+   */
+  sendFile(
+    target: QqReplyTarget,
+    source: QqMediaSource,
+    opts?: { fileName?: string; content?: string },
+  ): Promise<unknown>
 }
 
 /** User-document slice of the `qqbot` settings namespace. */

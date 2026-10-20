@@ -1,6 +1,3 @@
 import { clientBundle } from '../../client/tsdown.client.ts'
 
-export default clientBundle(
-  '@deepseek-ai/dsh-qqbot-clawbot',
-  ['lib/types/index.js'],
-)
+export default clientBundle(import.meta.dirname, ['lib/types/index.js'])
